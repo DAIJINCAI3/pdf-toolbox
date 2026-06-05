@@ -7,9 +7,9 @@ import { jsPDF } from "jspdf";
  */
 export async function imagesToPDF(files: File[]): Promise<Blob> {
   const pdf = new jsPDF("p", "mm", "a4");
-  const pageWidth = 210; // A4 宽度（mm）
-  const pageHeight = 297; // A4 高度（mm）
-  const margin = 10; // 边距（mm）
+  const pageWidth = 210;
+  const pageHeight = 297;
+  const margin = 10;
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
@@ -17,12 +17,13 @@ export async function imagesToPDF(files: File[]): Promise<Blob> {
     // 将图片文件转为 DataURL
     const dataUrl = await fileToDataURL(file);
 
-    // 第一张不需要加页
+    // 根据文件类型选择正确的图片格式
+    const format = getImageFormat(file.type);
+
     if (i > 0) {
       pdf.addPage();
     }
 
-    // 计算图片适配 A4 的尺寸（等比缩放）
     const imgProps = pdf.getImageProperties(dataUrl);
     const imgRatio = imgProps.width / imgProps.height;
     const maxW = pageWidth - margin * 2;
@@ -35,16 +36,25 @@ export async function imagesToPDF(files: File[]): Promise<Blob> {
       drawW = drawH * imgRatio;
     }
 
-    // 居中放置
     const x = (pageWidth - drawW) / 2;
     const y = (pageHeight - drawH) / 2;
 
-    pdf.addImage(dataUrl, "JPEG", x, y, drawW, drawH);
+    pdf.addImage(dataUrl, format, x, y, drawW, drawH);
   }
 
-  // 用 arraybuffer 输出，再手动生成标准 Blob，确保 WPS 等软件兼容
-  const arrayBuffer = pdf.output("arraybuffer");
-  return new Blob([arrayBuffer], { type: "application/pdf" });
+  // 直接使用 jsPDF 原生 blob 输出
+  return pdf.output("blob");
+}
+
+/**
+ * 根据 MIME 类型返回 jsPDF 支持的图片格式
+ */
+function getImageFormat(mimeType: string): string {
+  if (mimeType === "image/png") return "PNG";
+  if (mimeType === "image/jpeg") return "JPEG";
+  if (mimeType === "image/webp") return "WEBP";
+  if (mimeType === "image/bmp") return "BMP";
+  return "JPEG"; // 默认
 }
 
 /**
@@ -60,15 +70,21 @@ function fileToDataURL(file: File): Promise<string> {
 }
 
 /**
- * 触发浏览器下载 Blob 文件
+ * 触发浏览器下载 Blob 文件（兼容手机端）
  */
 export function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
+  // 确保 Blob 类型正确
+  const pdfBlob = new Blob([blob], { type: "application/pdf" });
+  const url = URL.createObjectURL(pdfBlob);
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
+  link.style.display = "none";
   document.body.appendChild(link);
   link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  // 延迟清理，确保手机浏览器处理完毕
+  setTimeout(() => {
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, 300);
 }
