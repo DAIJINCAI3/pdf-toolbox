@@ -42,7 +42,9 @@ export async function imagesToPDF(files: File[]): Promise<Blob> {
     pdf.addImage(dataUrl, "JPEG", x, y, drawW, drawH);
   }
 
-  return pdf.output("blob");
+  // 用 arraybuffer 输出，再手动生成标准 Blob，确保 WPS 等软件兼容
+  const arrayBuffer = pdf.output("arraybuffer");
+  return new Blob([arrayBuffer], { type: "application/pdf" });
 }
 
 /**
