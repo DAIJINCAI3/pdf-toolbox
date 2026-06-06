@@ -20,6 +20,12 @@ export default function Navbar() {
             首页
           </Link>
           <Link
+            href="/tools/ai"
+            className="text-gray-600 no-underline hover:text-blue-600"
+          >
+            🤖 AI
+          </Link>
+          <Link
             href="/pricing"
             className="text-gray-600 no-underline hover:text-blue-600"
           >

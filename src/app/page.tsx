@@ -26,6 +26,12 @@ const tools = [
     icon: "📷",
     href: "/tools/image2pdf",
   },
+  {
+    title: "AI 智能助手",
+    description: "AI 总结文档要点、与 PDF 对话问答",
+    icon: "🤖",
+    href: "/tools/ai",
+  },
 ];
 
 export default function HomePage() {
