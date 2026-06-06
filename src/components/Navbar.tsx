@@ -32,6 +32,12 @@ export default function Navbar() {
             转换
           </Link>
           <Link
+            href="/tools/edit"
+            className="text-gray-600 no-underline hover:text-blue-600"
+          >
+            编辑
+          </Link>
+          <Link
             href="/pricing"
             className="text-gray-600 no-underline hover:text-blue-600"
           >

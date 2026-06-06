@@ -38,6 +38,12 @@ const tools = [
     icon: "🔄",
     href: "/tools/convert",
   },
+  {
+    title: "文档编辑",
+    description: "PDF 添加文字标注和高亮标记",
+    icon: "✏️",
+    href: "/tools/edit",
+  },
 ];
 
 export default function HomePage() {
