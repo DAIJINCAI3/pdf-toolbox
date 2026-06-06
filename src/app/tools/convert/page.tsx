@@ -39,21 +39,21 @@ export default function ConvertPage() {
 
       switch (format) {
         case "docx":
-          blob = await pdfToDocx(buffer);
+          blob = await pdfToDocx(buffer, file.name);
           break;
         case "xlsx":
-          blob = await pdfToXlsx(buffer);
+          blob = await pdfToXlsx(buffer, file.name);
           break;
         case "pptx":
-          blob = await pdfToPptx(buffer);
+          blob = await pdfToPptx(buffer, file.name);
           break;
         default:
           throw new Error("不支持的格式");
       }
 
-      setProgress("转换完成，正在下载…");
       const fmt = FORMATS.find((f) => f.value === format)!;
-      downloadBlob(blob, fmt.filename);
+      const outName = file.name.replace(/\.pdf$/i, "") + "." + format;
+      downloadBlob(blob, outName);
       setProgress("✅ 下载完成！");
     } catch (e) {
       setError(e instanceof Error ? e.message : "转换失败");

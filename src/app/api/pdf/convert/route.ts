@@ -1,10 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 import { rateLimit } from "@/lib/rate-limit";
-import { execSync } from "child_process";
-import { writeFileSync, readFileSync, unlinkSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
-import { randomUUID } from "crypto";
+
+// 动态加载 Node.js 原生模块，避免 Turbopack 静态分析警告
+let _execSync: typeof import("child_process").execSync;
+let _writeFileSync: typeof import("fs").writeFileSync;
+let _readFileSync: typeof import("fs").readFileSync;
+let _unlinkSync: typeof import("fs").unlinkSync;
+let _tmpdir: typeof import("os").tmpdir;
+let _join: typeof import("path").join;
+let _randomUUID: typeof import("crypto").randomUUID;
+
+function loadNodeModules() {
+  if (!_execSync) {
+    _execSync = require("child_process").execSync;
+    _writeFileSync = require("fs").writeFileSync;
+    _readFileSync = require("fs").readFileSync;
+    _unlinkSync = require("fs").unlinkSync;
+    _tmpdir = require("os").tmpdir;
+    _join = require("path").join;
+    _randomUUID = require("crypto").randomUUID;
+  }
+  return { _execSync, _writeFileSync, _readFileSync, _unlinkSync, _tmpdir, _join, _randomUUID };
+}
 
 const FORMATS: Record<string, { ext: string; mime: string }> = {
   docx: { ext: "docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
@@ -14,11 +31,13 @@ const FORMATS: Record<string, { ext: string; mime: string }> = {
 
 function hasLibreOffice(): boolean {
   try {
-    execSync("soffice --version", { stdio: "ignore", timeout: 5000 });
+    const { _execSync: exec } = loadNodeModules();
+    exec("soffice --version", { stdio: "ignore", timeout: 5000 });
     return true;
   } catch {
     try {
-      execSync("libreoffice --version", { stdio: "ignore", timeout: 5000 });
+      const { _execSync: exec } = loadNodeModules();
+      exec("libreoffice --version", { stdio: "ignore", timeout: 5000 });
       return true;
     } catch {
       return false;
@@ -47,20 +66,22 @@ export async function POST(req: NextRequest) {
     if (!file) return NextResponse.json({ error: "请上传 PDF" }, { status: 400 });
     if (!FORMATS[targetFormat]) return NextResponse.json({ error: `不支持的格式: ${targetFormat}` }, { status: 400 });
 
+    const { _execSync: exec, _writeFileSync: writeFile, _readFileSync: readFile, _unlinkSync: unlink, _tmpdir: tmpDirFn, _join: joinFn, _randomUUID: uuidFn } = loadNodeModules();
+
     const fmt = FORMATS[targetFormat];
-    const tempDir = tmpdir();
-    const inputId = randomUUID();
-    const inputPath = join(tempDir, `${inputId}.pdf`);
-    const outputDir = join(tempDir, inputId);
-    const outputPath = join(outputDir, `${inputId}.${fmt.ext}`);
+    const tempDir = tmpDirFn();
+    const inputId = uuidFn();
+    const inputPath = joinFn(tempDir, `${inputId}.pdf`);
+    const outputDir = joinFn(tempDir, inputId);
+    const outputPath = joinFn(outputDir, `${inputId}.${fmt.ext}`);
 
     const bytes = await file.arrayBuffer();
-    writeFileSync(inputPath, Buffer.from(bytes));
+    writeFile(inputPath, Buffer.from(bytes));
 
-    execSync(`soffice --headless --convert-to ${fmt.ext} --outdir "${outputDir}" "${inputPath}"`, { timeout: 60000 });
+    exec(`soffice --headless --convert-to ${fmt.ext} --outdir "${outputDir}" "${inputPath}"`, { timeout: 60000 });
 
-    const result = readFileSync(outputPath);
-    try { unlinkSync(inputPath); unlinkSync(outputPath); } catch { /* ignore */ }
+    const result = readFile(outputPath);
+    try { unlink(inputPath); unlink(outputPath); } catch { /* ignore */ }
 
     return new NextResponse(result, {
       headers: {
