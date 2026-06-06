@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { rateLimit } from "@/lib/rate-limit";
 
-const MAX_TEXT_LENGTH = 3000;
+const MAX_TEXT_LENGTH = 8000;
 
 export async function POST(req: NextRequest) {
-  // 限流：每个 IP 每分钟最多 5 次
   const ip = req.headers.get("x-forwarded-for") || "unknown";
   const limit = rateLimit({
     windowMs: 60 * 1000,
@@ -16,49 +15,20 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const formData = await req.formData();
-    const file = formData.get("file") as File | null;
-    const userKey = (formData.get("apiKey") as string) || null;
+    const body = await req.json();
+    const { text, apiKey: userKey } = body as { text: string; apiKey?: string };
 
-    let text = "";
-
-    if (file) {
-      // --- 用 pdf-parse 提取文本 ---
-      const bytes = await file.arrayBuffer();
-      try {
-        const { extractPDFText } = await import("@/lib/extract-pdf-text");
-        text = await extractPDFText(bytes);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "未知错误";
-        console.error("PDF 文本提取失败:", msg);
-        return NextResponse.json(
-          { error: `无法解析该 PDF：${msg}` },
-          { status: 400 }
-        );
-      }
-    } else {
-      return NextResponse.json(
-        { error: "请上传 PDF 文件" },
-        { status: 400 }
-      );
+    if (!text || !text.trim()) {
+      return NextResponse.json({ error: "PDF 中未提取到文字" }, { status: 400 });
     }
 
-    if (!text.trim()) {
-      return NextResponse.json(
-        { error: "该 PDF 中未检测到文字，可能是扫描图片。请使用 OCR 工具或尝试其他文件。" },
-        { status: 400 }
-      );
-    }
-
-    // 取前 MAX_TEXT_LENGTH 字符
     const truncated = text.slice(0, MAX_TEXT_LENGTH);
     const truncatedHint =
       text.length > MAX_TEXT_LENGTH
-        ? `（注意：原文共 ${text.length.toLocaleString()} 字符，仅分析了前 ${MAX_TEXT_LENGTH.toLocaleString()} 字符）`
+        ? `（原文共 ${text.length.toLocaleString()} 字符，仅分析了前 ${MAX_TEXT_LENGTH.toLocaleString()} 字符）`
         : "";
 
-    // ---- 调用 DeepSeek（兼容 OpenAI SDK）----
-    const apiKey = userKey || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY;
+    const apiKey = userKey || process.env.DEEPSEEK_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
         { error: "未配置 API Key，请在页面中输入您的 DeepSeek API Key" },
@@ -67,10 +37,7 @@ export async function POST(req: NextRequest) {
     }
 
     const OpenAI = (await import("openai")).default;
-    const client = new OpenAI({
-      apiKey,
-      baseURL: "https://api.deepseek.com",
-    });
+    const client = new OpenAI({ apiKey, baseURL: "https://api.deepseek.com" });
 
     const completion = await client.chat.completions.create({
       model: "deepseek-chat",
@@ -79,37 +46,24 @@ export async function POST(req: NextRequest) {
         {
           role: "system",
           content:
-            "你是一个专业的文档分析助手。请用中文总结以下 PDF 文档内容，包括：1) 文档主题 2) 关键要点（3-5 条）3) 一句话总结。格式清晰，使用 Markdown。",
+            "你是一个专业的文档分析助手。请用中文总结文档内容：1) 文档主题 2) 关键要点（3-5条）3) 一句话总结。格式清晰。",
         },
-        {
-          role: "user",
-          content: `请总结以下文档内容：\n\n${truncated}`,
-        },
+        { role: "user", content: `请总结：\n\n${truncated}` },
       ],
     });
 
-    const summary = completion.choices[0]?.message?.content || "（未能生成总结）";
-
     return NextResponse.json({
-      summary,
+      summary: completion.choices[0]?.message?.content || "（未能生成总结）",
       textLength: text.length,
       truncated: text.length > MAX_TEXT_LENGTH,
       hint: truncatedHint,
     });
   } catch (err) {
     console.error("AI 总结失败:", err);
-    const message =
-      err instanceof Error ? err.message : "未知错误";
-    // 不暴露内部错误细节给前端
-    if (message.includes("401") || message.includes("Incorrect API key")) {
-      return NextResponse.json(
-        { error: "API Key 无效，请检查后重试" },
-        { status: 401 }
-      );
+    const msg = err instanceof Error ? err.message : "未知错误";
+    if (msg.includes("401") || msg.includes("Incorrect")) {
+      return NextResponse.json({ error: "API Key 无效" }, { status: 401 });
     }
-    return NextResponse.json(
-      { error: `AI 总结失败：${message}` },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: `AI 总结失败：${msg}` }, { status: 500 });
   }
 }

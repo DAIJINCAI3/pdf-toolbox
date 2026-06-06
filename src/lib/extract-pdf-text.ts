@@ -1,47 +1,29 @@
 /**
- * 用 pdf2json 提取 PDF 文本
- * 纯 Node.js，不依赖 Canvas/DOM，Vercel 兼容
+ * 浏览器端 PDF 文本提取
+ * 用 pdfjs-dist 在客户端直接提取，无需服务器
  */
-import PDFParser from "pdf2json";
 
-export async function extractPDFText(buffer: ArrayBuffer): Promise<string> {
-  const pdfParser = new PDFParser();
+export async function extractPDFTextClient(buffer: ArrayBuffer): Promise<string> {
+  const pdfjsLib = await import("pdfjs-dist");
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://unpkg.com/pdfjs-dist@6.0.227/build/pdf.worker.min.mjs";
 
-  return new Promise((resolve, reject) => {
-    pdfParser.on("pdfParser_dataReady", (pdfData) => {
-      try {
-        const texts: string[] = [];
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+  const texts: string[] = [];
 
-        for (const page of pdfData.Pages) {
-          const pageTexts: string[] = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    const pageText = content.items
+      .filter((item) => "str" in item)
+      .map((item) => (item as { str: string }).str)
+      .join(" ");
+    texts.push(pageText);
+  }
 
-          for (const text of page.Texts) {
-            // 每个 text 的 R 数组包含 [{T: "文字内容", ...}]
-            const line = text.R
-              .map((r) => decodeURIComponent(r.T))
-              .filter((t) => t.trim())
-              .join(" ");
-            if (line.trim()) {
-              pageTexts.push(line);
-            }
-          }
-
-          texts.push(pageTexts.join("\n"));
-        }
-
-        resolve(texts.join("\n\n"));
-      } catch (e) {
-        reject(e);
-      }
-    });
-
-    pdfParser.on("pdfParser_dataError", (err) => {
-      const msg = (err as { parserError?: Error }).parserError?.message || "未知解析错误";
-      reject(new Error(`PDF 解析失败: ${msg}`));
-    });
-
-    // 传入 Buffer
-    const nodeBuffer = Buffer.from(buffer);
-    pdfParser.parseBuffer(nodeBuffer);
-  });
+  const result = texts.join("\n\n");
+  if (!result.trim()) {
+    throw new Error("该 PDF 中没有文字，可能是扫描图片。请使用 OCR 工具。");
+  }
+  return result;
 }
