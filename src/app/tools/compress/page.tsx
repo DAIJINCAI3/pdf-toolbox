@@ -5,6 +5,7 @@ import FileUploader from "@/components/FileUploader";
 import { compressPDF, formatFileSize } from "@/lib/compress-pdf";
 import type { CompressionLevel, CompressionResult } from "@/lib/compress-pdf";
 import { downloadPDF } from "@/lib/merge-pdf";
+import ModeSwitch, { useProcessingMode, CloudTip } from "@/components/ModeSwitch";
 
 /** 三个压缩级别的配置 */
 const COMPRESSION_LEVELS: {
@@ -86,13 +87,23 @@ export default function CompressPage() {
     ? Math.round((1 - result.compressedSize / result.originalSize) * 100)
     : 0;
 
+  const { mode, showTip, dismissTip } = useProcessingMode({
+    fileSize: file?.size,
+  });
+
   return (
     <div className="mx-auto max-w-3xl px-4 py-10">
       <div className="mb-8">
-        <h1 className="mb-2 text-2xl font-bold">📦 PDF 压缩</h1>
-        <p className="text-gray-500">
-          减小 PDF 文件体积，压缩过程在浏览器本地完成
-        </p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="mb-2 text-2xl font-bold">📦 PDF 压缩</h1>
+            <p className="text-gray-500">
+              减小 PDF 文件体积，压缩过程在浏览器本地完成
+            </p>
+          </div>
+          <ModeSwitch mode={mode} onChange={() => {}} disabled />
+        </div>
+        {showTip && <div className="mt-3"><CloudTip onDismiss={dismissTip} /></div>}
       </div>
 
       {!file ? (
