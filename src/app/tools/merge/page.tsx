@@ -65,52 +65,57 @@ function SortableFileItem({
     <div
       ref={setNodeRef}
       style={style}
-      className="flex items-center gap-3 rounded-lg border border-gray-200 bg-white p-3 shadow-sm"
+      className="flex items-start gap-3 rounded-lg border border-gray-200 bg-white p-4 shadow-sm"
     >
       {/* 拖拽手柄 */}
       <button
         {...attributes}
         {...listeners}
-        className="cursor-grab touch-none text-lg text-gray-400 hover:text-gray-600 active:cursor-grabbing"
+        type="button"
+        className="mt-8 cursor-grab touch-none text-xl text-gray-400 hover:text-gray-600 active:cursor-grabbing"
         title="拖拽排序"
       >
         ⋮⋮
       </button>
 
       {/* 序号 */}
-      <span className="w-6 text-center text-sm font-bold text-gray-400">
+      <span className="mt-8 w-5 text-center text-sm font-bold text-gray-400">
         {index + 1}
       </span>
 
-      {/* 第一页缩略图 */}
-      <div className="h-24 w-20 flex-shrink-0 overflow-hidden rounded border border-gray-200 bg-gray-100">
+      {/* 第一页缩略图 — 占主要视觉区域 */}
+      <div className="h-36 w-28 flex-shrink-0 overflow-hidden rounded-lg border border-gray-200 bg-gray-100 shadow-inner">
         {entry.thumbnail ? (
           <img
             src={entry.thumbnail}
-            alt={`预览`}
+            alt={`${entry.file.name} 第一页预览`}
             className="h-full w-full object-contain"
           />
         ) : (
-          <div className="flex h-full items-center justify-center text-2xl text-gray-300">
+          <div className="flex h-full items-center justify-center text-4xl text-gray-300">
             📄
           </div>
         )}
       </div>
 
-      {/* 文件名 + 大小 */}
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-gray-800">
+      {/* 文件名 + 大小 + 页数 */}
+      <div className="min-w-0 flex-1 pt-2">
+        <p className="text-sm font-semibold text-gray-800 leading-snug line-clamp-2 break-all">
           {entry.file.name}
         </p>
-        <p className="text-xs text-gray-400">
+        <p className="mt-1 text-xs text-gray-400">
           {(entry.file.size / 1024 / 1024).toFixed(2)} MB
+        </p>
+        <p className="mt-3 text-xs text-gray-400">
+          ⋮⋮ 拖拽调整顺序
         </p>
       </div>
 
       {/* 删除按钮 */}
       <button
+        type="button"
         onClick={() => onRemove(entry.id)}
-        className="flex-shrink-0 text-red-400 hover:text-red-600"
+        className="mt-1 flex-shrink-0 rounded-full p-1 text-red-400 hover:bg-red-50 hover:text-red-600"
         title="移除"
       >
         ✕
@@ -140,7 +145,7 @@ export default function MergePage() {
       const arrayBuffer = await file.arrayBuffer();
       const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
       const page = await pdf.getPage(1);
-      const viewport = page.getViewport({ scale: 0.6 });
+      const viewport = page.getViewport({ scale: 1.2 });
       const canvas = document.createElement("canvas");
       canvas.width = viewport.width;
       canvas.height = viewport.height;
