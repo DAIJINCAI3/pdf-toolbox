@@ -136,25 +136,40 @@ export default function MergePage() {
   const idCounter = useRef(0);
 
   // ---- 生成缩略图辅助函数 ----
+  const pdfjsReady = useRef(false);
+
+  const ensurePdfjs = useCallback(async () => {
+    if (pdfjsReady.current) return;
+    const pdfjsLib = await import("pdfjs-dist");
+    // 使用 unpkg CDN，更稳定
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://unpkg.com/pdfjs-dist@6.0.227/build/pdf.worker.min.mjs";
+    pdfjsReady.current = true;
+  }, []);
+
   const generateThumbnail = useCallback(async (file: File): Promise<string | null> => {
     try {
+      await ensurePdfjs();
       const pdfjsLib = await import("pdfjs-dist");
-      pdfjsLib.GlobalWorkerOptions.workerSrc =
-        "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs";
 
       const arrayBuffer = await file.arrayBuffer();
       const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
       const page = await pdf.getPage(1);
-      const viewport = page.getViewport({ scale: 1.2 });
+      const viewport = page.getViewport({ scale: 1.5 });
       const canvas = document.createElement("canvas");
       canvas.width = viewport.width;
       canvas.height = viewport.height;
+      const ctx = canvas.getContext("2d")!;
+      // 白色背景，防止透明页面不可见
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
       await page.render({ canvas, viewport }).promise;
-      return canvas.toDataURL("image/jpeg", 0.8);
-    } catch {
-      return null; // 非 PDF 或损坏的文件不显示缩略图
+      return canvas.toDataURL("image/jpeg", 0.85);
+    } catch (err) {
+      console.error("缩略图生成失败:", err);
+      return null;
     }
-  }, []);
+  }, [ensurePdfjs]);
 
   // ---- 文件选择 ----
   const handleFilesSelected = useCallback(

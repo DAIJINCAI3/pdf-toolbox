@@ -80,7 +80,7 @@ export async function compressPDF(
 async function extremeImageResample(file: File): Promise<Uint8Array> {
   const pdfjsLib = await import("pdfjs-dist");
   pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs";
+    "https://unpkg.com/pdfjs-dist@6.0.227/build/pdf.worker.min.mjs";
 
   const { jsPDF } = await import("jspdf");
 

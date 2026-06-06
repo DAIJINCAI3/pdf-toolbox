@@ -11,7 +11,7 @@ if (typeof window !== "undefined") {
   import("pdfjs-dist").then((mod) => {
     pdfjsLib = mod;
     mod.GlobalWorkerOptions.workerSrc =
-      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs";
+      "https://unpkg.com/pdfjs-dist@6.0.227/build/pdf.worker.min.mjs";
   });
 }
 
