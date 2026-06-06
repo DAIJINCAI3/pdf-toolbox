@@ -32,11 +32,29 @@ async function extractLines(
   buffer: ArrayBuffer,
   onProgress?: (msg: string) => void
 ): Promise<Line[]> {
-  const pdfjsLib = await import("pdfjs-dist");
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "https://unpkg.com/pdfjs-dist@6.0.227/build/pdf.worker.min.mjs";
+  let pdfjsLib: any;
+  try {
+    pdfjsLib = await import("pdfjs-dist");
+  } catch (e) {
+    throw new Error(`PDF 引擎加载失败，请刷新页面重试。`);
+  }
 
-  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+  // worker URL 与安装版本自动匹配
+  const ver = pdfjsLib.version || "6.0.227";
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    `https://unpkg.com/pdfjs-dist@${ver}/build/pdf.worker.min.mjs`;
+
+  let pdf: any;
+  try {
+    const loadingTask = pdfjsLib.getDocument({
+      data: new Uint8Array(buffer),
+      disableAutoFetch: true,
+    });
+    pdf = await loadingTask.promise;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "未知";
+    throw new Error(`PDF 解析失败：${msg}。文件可能已损坏或加密。`);
+  }
   const total = pdf.numPages;
   const allLines: Line[] = [];
 
