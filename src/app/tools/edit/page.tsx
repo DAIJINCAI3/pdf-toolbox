@@ -3,27 +3,29 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import FileUploader from "@/components/FileUploader";
 import {
-  renderPage, getTotalPages, saveEditedPDF, findHighlightRects,
-  type TextAnnotation, type HighlightRange, type TextItem,
+  renderPage, getTotalPages, saveEditedPDF, findMarkRects,
+  type TextAnnotation, type MarkAnnotation, type PenStroke, type TextItem,
 } from "@/lib/pdf-editor";
 import { downloadPDF } from "@/lib/merge-pdf";
 
 /* ================================================================
-   常量
+   颜色预设
    ================================================================ */
 
-const HL_COLORS = [
-  { hex: "#fde047", label: "黄色", border: "#eab308" },
-  { hex: "#fca5a5", label: "红色", border: "#ef4444" },
-  { hex: "#a5f3fc", label: "青色", border: "#06b6d4" },
-  { hex: "#bbf7d0", label: "绿色", border: "#22c55e" },
+const COLORS = [
+  { hex: "#fde047", name: "黄" },
+  { hex: "#86efac", name: "绿" },
+  { hex: "#93c5fd", name: "蓝" },
+  { hex: "#fca5a5", name: "红" },
+  { hex: "#d8b4fe", name: "紫" },
+  { hex: "#fdba74", name: "橙" },
 ];
 
-const TEXT_COLORS = [
-  { hex: "#cc0000", label: "红" },
-  { hex: "#2563eb", label: "蓝" },
-  { hex: "#16a34a", label: "绿" },
-  { hex: "#1e293b", label: "黑" },
+const PEN_COLORS = [
+  { hex: "#ef4444", name: "红" },
+  { hex: "#1e293b", name: "黑" },
+  { hex: "#2563eb", name: "蓝" },
+  { hex: "#16a34a", name: "绿" },
 ];
 
 /* ================================================================
@@ -32,289 +34,252 @@ const TEXT_COLORS = [
 
 export default function EditPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const overlayRef = useRef<HTMLDivElement>(null);
   const bufferRef = useRef<ArrayBuffer | null>(null);
   const textItemsRef = useRef<TextItem[]>([]);
+  const bgRef = useRef<HTMLCanvasElement | null>(null);
 
   const [file, setFile] = useState<File | null>(null);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(0);
-  const [pageSize, setPageSize] = useState({ w: 0, h: 0 });
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [scale, setScale] = useState(1.5);
 
-  // 工具
-  const [tool, setTool] = useState<"highlight" | "text">("highlight");
-  const [hlColor, setHlColor] = useState(HL_COLORS[0]);
-  const [textColor, setTextColor] = useState(TEXT_COLORS[0].hex);
-  const [fontSize, setFontSize] = useState(16);
+  // 工具模式
+  type Tool = "select" | "pen" | "text";
+  const [tool, setTool] = useState<Tool>("select");
+
+  // 颜色
+  const [hlColor, setHlColor] = useState(COLORS[0].hex);
+  const [penColor, setPenColor] = useState(PEN_COLORS[1].hex);
+  const [penWidth, setPenWidth] = useState(3);
+  const [textColor, setTextColor] = useState("#cc0000");
+  const [textSize, setTextSize] = useState(16);
 
   // 标注数据
-  const [highlights, setHighlights] = useState<HighlightRange[]>([]);
-  const [textAnnos, setTextAnnos] = useState<TextAnnotation[]>([]);
+  const [marks, setMarks] = useState<MarkAnnotation[]>([]);
+  const [texts, setTexts] = useState<TextAnnotation[]>([]);
+  const [strokes, setStrokes] = useState<PenStroke[]>([]);
+  const [undoStack, setUndoStack] = useState<{ marks: MarkAnnotation[]; texts: TextAnnotation[]; strokes: PenStroke[] }[]>([]);
 
-  // 拖拽状态
+  // 选区
   const [selecting, setSelecting] = useState(false);
   const [selStart, setSelStart] = useState({ x: 0, y: 0 });
   const [selEnd, setSelEnd] = useState({ x: 0, y: 0 });
+  const [selRects, setSelRects] = useState<{ x: number; y: number; w: number; h: number }[]>([]);
 
-  // 文字添加状态
+  // 浮动菜单位置
+  const [floatMenu, setFloatMenu] = useState<{ x: number; y: number } | null>(null);
+
+  // 画笔
+  const [drawing, setDrawing] = useState(false);
+  const curStrokeRef = useRef<PenStroke | null>(null);
+
+  // 文字输入
   const [addingText, setAddingText] = useState<{ x: number; y: number } | null>(null);
   const [draftText, setDraftText] = useState("");
 
-  // 选中文字（用于高亮）
   const idRef = useRef(0);
-  const nextId = () => `a-${++idRef.current}`;
-
-  /** 高亮颜色 → 边框颜色 */
-  function hlColorsBorder(hex: string): string {
-    const map: Record<string, string> = { "#fde047": "#eab308", "#fca5a5": "#ef4444", "#a5f3fc": "#06b6d4", "#bbf7d0": "#22c55e" };
-    return map[hex] || "#888888";
-  }
-
-  // scale 写死 1.5，与 renderPage 保持一致
-  const SCALE = 1.5;
+  const nid = () => `a${++idRef.current}`;
 
   /* ================================================================
-     渲染
+     页面渲染 + overlay
      ================================================================ */
 
-  const renderCurrentPage = useCallback(async (buf: ArrayBuffer, page: number) => {
+  const renderCur = useCallback(async (buf: ArrayBuffer, pg: number) => {
     if (!canvasRef.current) return;
     setLoading(true);
     try {
-      const result = await renderPage(buf, page, canvasRef.current, SCALE);
-      textItemsRef.current = result.textItems;
-      setPageSize({ w: result.width, h: result.height });
-      drawAnnotations();
+      const r = await renderPage(buf, pg, canvasRef.current, scale);
+      textItemsRef.current = r.textItems;
+      if (!bgRef.current) bgRef.current = document.createElement("canvas");
+      bgRef.current.width = canvasRef.current.width;
+      bgRef.current.height = canvasRef.current.height;
+      bgRef.current.getContext("2d")!.drawImage(canvasRef.current, 0, 0);
+      drawAll();
     } catch (e) {
-      setError("渲染失败：" + (e instanceof Error ? e.message : ""));
-    } finally {
-      setLoading(false);
+      setError(e instanceof Error ? e.message : "渲染失败");
+    } finally { setLoading(false); }
+  }, [scale]);
+
+  function drawAll() {
+    const c = canvasRef.current, b = bgRef.current;
+    if (!c || !b) return;
+    const ctx = c.getContext("2d")!;
+    ctx.clearRect(0, 0, c.width, c.height);
+    ctx.drawImage(b, 0, 0);
+
+    // marks
+    for (const m of marks) {
+      if (m.pageNum !== page) continue;
+      for (const r of m.rects) {
+        if (m.type === "highlight") { ctx.fillStyle = m.color; ctx.globalAlpha = 0.35; ctx.fillRect(r.x, r.y, r.w, r.h); ctx.globalAlpha = 1; }
+        if (m.type === "underline") { ctx.strokeStyle = m.color; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(r.x, r.y + r.h - 2); ctx.lineTo(r.x + r.w, r.y + r.h - 2); ctx.stroke(); }
+        if (m.type === "strikethrough") { ctx.strokeStyle = m.color; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(r.x, r.y + r.h / 2); ctx.lineTo(r.x + r.w, r.y + r.h / 2); ctx.stroke(); }
+      }
     }
-  }, []);
 
-  // 每次标注/页码变化后重绘标注
-  useEffect(() => {
-    drawAnnotations();
-  }, [highlights, textAnnos, currentPage, selecting, selEnd]);
+    // texts
+    for (const a of texts) {
+      if (a.pageNum !== page) continue;
+      ctx.font = `bold ${a.fontSize}px "Microsoft YaHei", sans-serif`;
+      ctx.shadowColor = "rgba(255,255,255,0.9)"; ctx.shadowBlur = 3;
+      ctx.fillStyle = a.color; ctx.fillText(a.text, a.x, a.y);
+    }
 
-  function drawAnnotations() {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    // strokes
+    for (const s of strokes) {
+      if (s.pageNum !== page || s.points.length < 2) continue;
+      ctx.strokeStyle = s.color; ctx.lineWidth = s.width; ctx.lineCap = "round"; ctx.lineJoin = "round";
+      ctx.globalAlpha = 0.8;
+      ctx.beginPath(); ctx.moveTo(s.points[0].x, s.points[0].y);
+      for (let i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
+      ctx.stroke(); ctx.globalAlpha = 1;
+    }
 
-    // 重新渲染基础页面
-    if (bufferRef.current) {
-      renderPage(bufferRef.current, currentPage, canvas, SCALE).then((result) => {
-        textItemsRef.current = result.textItems;
-        setPageSize({ w: result.width, h: result.height });
+    // selection preview
+    if (selecting && selRects.length) {
+      for (const r of selRects) { ctx.fillStyle = hlColor; ctx.globalAlpha = 0.2; ctx.fillRect(r.x, r.y, r.w, r.h); }
+      ctx.globalAlpha = 1;
+    }
 
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
-
-        // 高亮
-        for (const hl of highlights) {
-          if (hl.pageNum !== currentPage) continue;
-          ctx.save();
-          for (const r of hl.rects) {
-            ctx.fillStyle = hl.color;
-            ctx.globalAlpha = 0.35;
-            ctx.fillRect(r.x, r.y, r.w, r.h);
-            ctx.globalAlpha = 1;
-            ctx.strokeStyle = hlColorsBorder(hl.color);
-            ctx.lineWidth = 1;
-            ctx.strokeRect(r.x, r.y, r.w, r.h);
-          }
-          ctx.restore();
-        }
-
-        // 文字标注
-        for (const a of textAnnos) {
-          if (a.pageNum !== currentPage) continue;
-          ctx.save();
-          ctx.font = `bold ${a.fontSize}px "Microsoft YaHei", sans-serif`;
-          ctx.shadowColor = "rgba(255,255,255,0.85)";
-          ctx.shadowBlur = 4;
-          ctx.fillStyle = a.color;
-          ctx.fillText(a.text, a.x, a.y);
-          ctx.restore();
-        }
-
-        // 拖拽选区的实时预览
-        if (selecting) {
-          const box = getSelectionBox();
-          if (box.w > 3 || box.h > 3) {
-            const rects = findHighlightRects(box, textItemsRef.current);
-            ctx.save();
-            ctx.fillStyle = hlColor.hex;
-            ctx.globalAlpha = 0.25;
-            ctx.strokeStyle = hlColor.border;
-            ctx.lineWidth = 1;
-            ctx.setLineDash([4, 2]);
-            for (const r of rects) {
-              ctx.fillRect(r.x, r.y, r.w, r.h);
-              ctx.strokeRect(r.x, r.y, r.w, r.h);
-            }
-            ctx.restore();
-          }
-        }
-      });
+    // drawing preview
+    if (drawing && curStrokeRef.current?.points.length) {
+      const s = curStrokeRef.current;
+      ctx.strokeStyle = s.color; ctx.lineWidth = s.width; ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.globalAlpha = 0.8;
+      ctx.beginPath(); ctx.moveTo(s.points[0].x, s.points[0].y);
+      for (let i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
+      ctx.stroke(); ctx.globalAlpha = 1;
     }
   }
 
-  function getSelectionBox() {
-    return {
-      x: Math.min(selStart.x, selEnd.x),
-      y: Math.min(selStart.y, selEnd.y),
-      w: Math.abs(selEnd.x - selStart.x),
-      h: Math.abs(selEnd.y - selStart.y),
-    };
-  }
+  useEffect(() => { drawAll(); }, [marks, texts, strokes, page, selecting, selRects, drawing]);
 
   /* ================================================================
-     文件加载
+     文件 / 翻页
      ================================================================ */
 
-  const handleFileSelected = useCallback(async (files: File[]) => {
-    if (files.length === 0) return;
-    const f = files[0];
-    setFile(f);
-    setHighlights([]);
-    setTextAnnos([]);
-    setCurrentPage(1);
-    setError("");
+  const loadFile = useCallback(async (files: File[]) => {
+    if (!files.length) return;
+    const f = files[0]; setFile(f); setMarks([]); setTexts([]); setStrokes([]); setUndoStack([]); setPage(1); setError("");
+    const buf = await f.arrayBuffer(); bufferRef.current = buf.slice(0);
+    try { setTotal(await getTotalPages(buf)); await renderCur(bufferRef.current, 1); } catch (e) { setError(String(e)); }
+  }, [renderCur]);
 
-    const buf = await f.arrayBuffer();
-    bufferRef.current = buf.slice(0); // 拷贝，防止 pdfjs worker detach
-
-    try {
-      const total = await getTotalPages(buf);
-      setTotalPages(total);
-      await renderCurrentPage(bufferRef.current, 1);
-    } catch (e) {
-      setError("无法加载：" + (e instanceof Error ? e.message : ""));
-    }
-  }, [renderCurrentPage]);
-
-  const goPage = (p: number) => {
-    if (p < 1 || p > totalPages || !bufferRef.current) return;
-    setCurrentPage(p);
-    renderCurrentPage(bufferRef.current, p);
-  };
+  const go = (p: number) => { if (p < 1 || p > total || !bufferRef.current) return; setPage(p); renderCur(bufferRef.current, p); };
 
   /* ================================================================
-     Overlay 交互
+     交互
      ================================================================ */
 
-  const getEventPos = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!overlayRef.current) return { x: 0, y: 0 };
-    const rect = overlayRef.current.getBoundingClientRect();
-    // canvas 的 CSS 尺寸可能被缩放，需要换算到 canvas 实际像素
-    const scaleX = (canvasRef.current?.width || 1) / rect.width;
-    const scaleY = (canvasRef.current?.height || 1) / rect.height;
-    return {
-      x: (e.clientX - rect.left) * scaleX,
-      y: (e.clientY - rect.top) * scaleY,
-    };
+  const pos = (e: React.MouseEvent) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    return { x: (e.clientX - r.left) * (canvasRef.current!.width / r.width), y: (e.clientY - r.top) * (canvasRef.current!.height / r.height) };
   };
 
-  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (tool === "text") {
-      const pos = getEventPos(e);
-      setAddingText(pos);
-      setDraftText("");
+  const pushUndo = () => setUndoStack(p => [...p.slice(-19), { marks: [...marks], texts: [...texts], strokes: [...strokes] }]);
+  const undo = () => {
+    const s = undoStack[undoStack.length - 1]; if (!s) return;
+    setMarks(s.marks); setTexts(s.texts); setStrokes(s.strokes); setUndoStack(p => p.slice(0, -1));
+  };
+
+  const md = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const p = pos(e);
+
+    if (tool === "pen") {
+      pushUndo();
+      setDrawing(true);
+      curStrokeRef.current = { id: nid(), pageNum: page, points: [p], color: penColor, width: penWidth };
       return;
     }
 
-    if (tool === "highlight") {
-      const pos = getEventPos(e);
-      setSelStart(pos);
-      setSelEnd(pos);
-      setSelecting(true);
+    if (tool === "text") {
+      setAddingText(p); setDraftText(""); return;
+    }
+
+    // select mode — 开始选择
+    setFloatMenu(null);
+    setSelStart(p); setSelEnd(p); setSelRects([]); setSelecting(true);
+  };
+
+  const mm = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const p = pos(e);
+
+    if (drawing && curStrokeRef.current) {
+      curStrokeRef.current.points.push(p);
+      drawAll(); // 实时画笔预览
+      return;
+    }
+
+    if (selecting) {
+      setSelEnd(p);
+      const box = { x: Math.min(selStart.x, p.x), y: Math.min(selStart.y, p.y), w: Math.abs(p.x - selStart.x), h: Math.abs(p.y - selStart.y) };
+      setSelEnd(p);
+      if (box.w > 3 || box.h > 3) setSelRects(findMarkRects(box, textItemsRef.current));
     }
   };
 
-  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (tool === "highlight" && selecting) {
-      setSelEnd(getEventPos(e));
-    }
-  };
+  const mu = (e: React.MouseEvent) => {
+    e.preventDefault();
 
-  const handleMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (tool === "highlight" && selecting) {
+    if (drawing && curStrokeRef.current) {
+      setStrokes(p => [...p, { ...curStrokeRef.current!, points: [...curStrokeRef.current!.points] }]);
+      setDrawing(false); curStrokeRef.current = null; return;
+    }
+
+    if (selecting) {
       setSelecting(false);
-      const end = getEventPos(e);
-      setSelEnd(end);
-
-      const box = {
-        x: Math.min(selStart.x, end.x),
-        y: Math.min(selStart.y, end.y),
-        w: Math.abs(end.x - selStart.x),
-        h: Math.abs(end.y - selStart.y),
-      };
-
-      const rects = findHighlightRects(box, textItemsRef.current);
-      if (rects.length > 0) {
-        setHighlights((prev) => [
-          ...prev,
-          { id: nextId(), pageNum: currentPage, rects, color: hlColor.hex },
-        ]);
+      if (selRects.length > 0) {
+        const p = pos(e);
+        // 浮动菜单位置：选区右下角
+        const lastR = selRects[selRects.length - 1];
+        setFloatMenu({ x: lastR.x + lastR.w + 8, y: lastR.y - 8 });
+      } else {
+        setFloatMenu(null);
       }
     }
   };
 
   /* ================================================================
-     文字确认
+     标注操作
      ================================================================ */
 
-  const confirmText = () => {
-    if (!addingText || !draftText.trim()) {
-      setAddingText(null);
-      return;
-    }
-
-    setTextAnnos((prev) => [
-      ...prev,
-      {
-        id: nextId(),
-        pageNum: currentPage,
-        text: draftText.trim(),
-        x: addingText.x,
-        y: addingText.y,
-        fontSize,
-        color: textColor,
-      },
-    ]);
-    setAddingText(null);
-    setDraftText("");
+  const doMark = (type: MarkAnnotation["type"]) => {
+    if (!selRects.length) return;
+    pushUndo();
+    setMarks(p => [...p, { id: nid(), pageNum: page, type, rects: [...selRects], color: hlColor }]);
+    setFloatMenu(null); setSelRects([]);
   };
 
-  /* ================================================================
-     删除 + 保存
-     ================================================================ */
+  const addText = () => {
+    if (!addingText || !draftText.trim()) { setAddingText(null); return; }
+    pushUndo();
+    setTexts(p => [...p, { id: nid(), pageNum: page, text: draftText.trim(), x: addingText.x, y: addingText.y, fontSize: textSize, color: textColor }]);
+    setAddingText(null); setDraftText("");
+  };
 
-  const removeHighlight = (id: string) => setHighlights((prev) => prev.filter((h) => h.id !== id));
-  const removeTextAnno = (id: string) => setTextAnnos((prev) => prev.filter((a) => a.id !== id));
+  const deleteAnno = (type: "mark" | "text" | "stroke", id: string) => {
+    pushUndo();
+    if (type === "mark") setMarks(p => p.filter(m => m.id !== id));
+    if (type === "text") setTexts(p => p.filter(t => t.id !== id));
+    if (type === "stroke") setStrokes(p => p.filter(s => s.id !== id));
+  };
 
-  const handleSave = async () => {
+  const save = async () => {
     if (!bufferRef.current || !file) return;
     setLoading(true);
     try {
-      const data = await saveEditedPDF(bufferRef.current, textAnnos, highlights, SCALE);
-      const name = file.name.replace(/\.pdf$/i, "");
-      downloadPDF(data, `${name}_标注版.pdf`);
-    } catch (e) {
-      setError("保存失败：" + (e instanceof Error ? e.message : ""));
-    } finally {
-      setLoading(false);
-    }
+      const d = await saveEditedPDF(bufferRef.current, texts, marks, strokes, scale);
+      downloadPDF(d, file.name.replace(/\.pdf$/i, "") + "_标注版.pdf");
+    } catch (e) { setError(String(e)); } finally { setLoading(false); }
   };
 
-  // 当前页标注
-  const curHL = highlights.filter((h) => h.pageNum === currentPage);
-  const curTA = textAnnos.filter((a) => a.pageNum === currentPage);
-  const allHL = highlights.filter((h) => h.pageNum !== currentPage);
-  const allTA = textAnnos.filter((a) => a.pageNum !== currentPage);
+  const curM = marks.filter(m => m.pageNum === page);
+  const curT = texts.filter(t => t.pageNum === page);
+  const curS = strokes.filter(s => s.pageNum === page);
+  const totalAnno = marks.length + texts.length + strokes.length;
 
   /* ================================================================
      UI
@@ -323,239 +288,110 @@ export default function EditPage() {
   return (
     <div className="mx-auto max-w-6xl px-4 py-6">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">✏️ PDF 标注编辑</h1>
-        <p className="mt-1 text-sm text-gray-500">选中文字自动高亮 · 点击任意位置添加标注 · 所见即所得</p>
+        <h1 className="text-2xl font-bold text-gray-900">✏️ PDF 标注</h1>
+        <p className="mt-1 text-sm text-gray-500">选区弹出工具栏 · 自由画笔 · 便签批注</p>
       </div>
 
       {!file ? (
-        <FileUploader
-          accept={{ "application/pdf": [".pdf"] }}
-          multiple={false}
-          onFilesSelected={handleFileSelected}
-          placeholder="拖拽 PDF 文件或点击选择"
-          subPlaceholder="选择需要标注的 PDF"
-        />
+        <FileUploader accept={{ "application/pdf": [".pdf"] }} multiple={false} onFilesSelected={loadFile} placeholder="拖拽 PDF 或点击选择" subPlaceholder="选择需要标注的 PDF" />
       ) : (
         <div className="flex gap-4">
-          {/* ===== 左侧编辑区 ===== */}
+          {/* 编辑区 */}
           <div className="flex-1 min-w-0">
             {/* 工具栏 */}
-            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white p-2.5">
-              <span className="text-xs text-gray-400 mr-1">工具：</span>
-              <button
-                type="button"
-                onClick={() => setTool("highlight")}
-                className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-                  tool === "highlight"
-                    ? "bg-amber-100 text-amber-800 ring-1 ring-amber-400"
-                    : "bg-gray-50 text-gray-600 hover:bg-gray-100"
-                }`}
-              >
-                🖍️ 划词高亮
-              </button>
-              <button
-                type="button"
-                onClick={() => setTool("text")}
-                className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${
-                  tool === "text"
-                    ? "bg-blue-100 text-blue-800 ring-1 ring-blue-400"
-                    : "bg-gray-50 text-gray-600 hover:bg-gray-100"
-                }`}
-              >
-                🔤 添加文字
-              </button>
+            <div className="mb-3 flex flex-wrap items-center gap-1.5 rounded-lg border bg-white p-2">
+              {/* 工具切换 */}
+              <button type="button" onClick={() => { setTool("select"); setSelRects([]); setFloatMenu(null); }} className={`rounded px-3 py-1.5 text-xs font-medium transition ${tool === "select" ? "bg-gray-800 text-white" : "bg-gray-50 text-gray-600 hover:bg-gray-100"}`}>📝 选区</button>
+              <button type="button" onClick={() => { setTool("pen"); setSelRects([]); setFloatMenu(null); }} className={`rounded px-3 py-1.5 text-xs font-medium transition ${tool === "pen" ? "bg-gray-800 text-white" : "bg-gray-50 text-gray-600 hover:bg-gray-100"}`}>✒️ 画笔</button>
+              <button type="button" onClick={() => { setTool("text"); setSelRects([]); setFloatMenu(null); }} className={`rounded px-3 py-1.5 text-xs font-medium transition ${tool === "text" ? "bg-gray-800 text-white" : "bg-gray-50 text-gray-600 hover:bg-gray-100"}`}>💬 文字</button>
 
-              <span className="mx-1 text-gray-200">|</span>
+              <span className="mx-1 h-5 w-px bg-gray-200" />
 
-              {tool === "highlight" ? (
+              {/* 画笔配置 */}
+              {tool === "pen" && (
                 <>
-                  <span className="text-xs text-gray-400">颜色：</span>
-                  {HL_COLORS.map((c) => (
-                    <button
-                      key={c.hex} type="button" title={c.label}
-                      onClick={() => setHlColor(c)}
-                      className="h-6 w-7 rounded border-2 transition-all"
-                      style={{
-                        backgroundColor: c.hex,
-                        borderColor: hlColor.hex === c.hex ? "#1e293b" : "transparent",
-                      }}
-                    />
-                  ))}
-                </>
-              ) : (
-                <>
-                  <span className="text-xs text-gray-400">颜色：</span>
-                  {TEXT_COLORS.map((c) => (
-                    <button
-                      key={c.hex} type="button" title={c.label}
-                      onClick={() => setTextColor(c.hex)}
-                      className="h-6 w-6 rounded-full border-2 transition-all"
-                      style={{
-                        backgroundColor: c.hex,
-                        borderColor: textColor === c.hex ? "#1e293b" : "transparent",
-                      }}
-                    />
-                  ))}
-                  <span className="text-xs text-gray-400 ml-1">大小：</span>
-                  <select
-                    value={fontSize}
-                    onChange={(e) => setFontSize(Number(e.target.value))}
-                    className="rounded border border-gray-300 px-2 py-1 text-xs"
-                    title="字号"
-                  >
-                    {[12,14,16,18,20,24,28,32,40].map((s) => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
+                  {PEN_COLORS.map(c => <button key={c.hex} type="button" title={c.name} onClick={() => setPenColor(c.hex)} className="h-6 w-6 rounded-full border-2" style={{ backgroundColor: c.hex, borderColor: penColor === c.hex ? "#1e293b" : "transparent" }} />)}
+                  <select value={penWidth} onChange={e => setPenWidth(+e.target.value)} className="rounded border px-1.5 py-1 text-xs" title="粗细">{ [1,2,3,5,8].map(w => <option key={w} value={w}>{w}px</option>) }</select>
                 </>
               )}
 
-              <span className="mx-1 text-gray-200">|</span>
+              {/* 选区颜色 */}
+              {tool === "select" && (
+                COLORS.map(c => <button key={c.hex} type="button" title={c.name} onClick={() => setHlColor(c.hex)} className="h-6 w-6 rounded border-2" style={{ backgroundColor: c.hex, borderColor: hlColor === c.hex ? "#1e293b" : "transparent" }} />)
+              )}
 
-              <button
-                type="button"
-                onClick={handleSave}
-                disabled={loading || (highlights.length === 0 && textAnnos.length === 0)}
-                className="rounded bg-green-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-40"
-              >
-                💾 保存下载
-              </button>
+              {/* 文字颜色+大小 */}
+              {tool === "text" && (
+                <>
+                  {["#cc0000", "#2563eb", "#16a34a", "#1e293b"].map(h => <button key={h} type="button" onClick={() => setTextColor(h)} className="h-6 w-6 rounded-full border-2" style={{ backgroundColor: h, borderColor: textColor === h ? "#1e293b" : "transparent" }} />)}
+                  <select value={textSize} onChange={e => setTextSize(+e.target.value)} className="rounded border px-1.5 py-1 text-xs" title="大小">{ [12,14,16,18,24,32].map(s => <option key={s} value={s}>{s}px</option>) }</select>
+                </>
+              )}
+
+              <span className="mx-1 h-5 w-px bg-gray-200" />
+
+              <button type="button" onClick={undo} disabled={undoStack.length === 0} className="rounded border px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-30" title="撤销">↩ 撤销</button>
+              <div className="flex-1" />
+              <button type="button" onClick={save} disabled={loading || totalAnno === 0} className="rounded bg-green-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-40">💾 保存下载</button>
             </div>
 
-            {/* 提示条 */}
-            <div className="mb-2 rounded bg-gray-50 px-3 py-1.5 text-xs text-gray-500">
-              {tool === "highlight"
-                ? "🖍️ 按住鼠标在文字上拖拽 → 自动识别文字区域 → 松开即高亮"
-                : "🔤 在 PDF 上点击任意位置 → 输入文字 → 按 Enter 确认"}
+            {/* 提示 */}
+            <div className="mb-2 rounded bg-gray-50 px-3 py-1 text-xs text-gray-400">
+              {tool === "select" && "📝 在文字上按住拖拽 → 选中文字 → 弹出工具栏选择高亮/下划线/删除线"}
+              {tool === "pen" && "✒️ 按住鼠标/触屏自由绘制 → 松手完成一笔"}
+              {tool === "text" && "💬 点击 PDF 任意位置 → 输入文字 → Enter 确认"}
             </div>
 
-            {error && (
-              <div className="mb-2 rounded bg-red-50 px-3 py-1.5 text-xs text-red-600">{error}</div>
-            )}
+            {error && <div className="mb-2 rounded bg-red-50 px-3 py-1 text-xs text-red-600">{error}</div>}
 
             {/* 翻页 */}
-            {totalPages > 1 && (
+            {total > 1 && (
               <div className="mb-2 flex items-center justify-center gap-3 text-sm">
-                <button onClick={() => goPage(currentPage - 1)} disabled={currentPage <= 1} className="rounded border px-2 py-1 disabled:opacity-30">←</button>
-                <span className="text-gray-600">{currentPage}/{totalPages}</span>
-                <button onClick={() => goPage(currentPage + 1)} disabled={currentPage >= totalPages} className="rounded border px-2 py-1 disabled:opacity-30">→</button>
+                <button type="button" onClick={() => go(page - 1)} disabled={page <= 1} className="rounded border px-2 py-1 disabled:opacity-30">←</button>
+                <span className="text-gray-600 min-w-[60px] text-center">{page} / {total}</span>
+                <button type="button" onClick={() => go(page + 1)} disabled={page >= total} className="rounded border px-2 py-1 disabled:opacity-30">→</button>
               </div>
             )}
 
-            {/* Canvas + Overlay */}
+            {/* Canvas */}
             <div className="relative inline-block rounded-lg border border-gray-300 bg-white shadow-sm overflow-hidden">
-              {loading && (
-                <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/60">
-                  <span className="text-sm text-gray-400">加载中…</span>
+              {loading && <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/60"><span className="text-sm text-gray-400">加载中…</span></div>}
+              <canvas ref={canvasRef} className="block max-w-full" />
+              <div className="absolute inset-0" style={{ cursor: tool === "pen" ? "crosshair" : tool === "text" ? "cell" : "text", touchAction: "none", userSelect: "none" }} onMouseDown={md} onMouseMove={mm} onMouseUp={mu} onMouseLeave={() => { if (!drawing) setSelecting(false); }} />
+
+              {/* 浮动工具栏 — 选区后弹出 */}
+              {floatMenu && selRects.length > 0 && (
+                <div className="absolute z-30 flex items-center gap-0.5 rounded-lg border bg-white p-1 shadow-xl" style={{ left: floatMenu.x / scale, top: floatMenu.y / scale - 40 }}>
+                  <button type="button" onClick={() => doMark("highlight")} className="rounded px-2 py-1 text-xs font-medium hover:bg-yellow-100" title="高亮">🖍️ 高亮</button>
+                  <button type="button" onClick={() => doMark("underline")} className="rounded px-2 py-1 text-xs font-medium hover:bg-blue-100" title="下划线">T̲ 下划线</button>
+                  <button type="button" onClick={() => doMark("strikethrough")} className="rounded px-2 py-1 text-xs font-medium hover:bg-red-100" title="删除线">T̶ 删除线</button>
+                  <button type="button" onClick={() => setFloatMenu(null)} className="ml-1 rounded px-1 py-0.5 text-xs text-gray-400 hover:text-gray-600">✕</button>
                 </div>
               )}
-              <canvas ref={canvasRef} className="block max-w-full" />
-              {/* 透明交互层 */}
-              <div
-                ref={overlayRef}
-                className="absolute inset-0 z-5"
-                style={{ cursor: tool === "highlight" ? "text" : "crosshair" }}
-                onMouseDown={handleMouseDown}
-                onMouseMove={handleMouseMove}
-                onMouseUp={handleMouseUp}
-                onMouseLeave={() => setSelecting(false)}
-              />
 
-              {/* 文字输入框（原位编辑） */}
+              {/* 文字输入浮层 */}
               {addingText && (
-                <div
-                  className="absolute z-20"
-                  style={{ left: addingText.x / SCALE, top: addingText.y / SCALE }}
-                >
-                  <div className="flex items-center gap-1 rounded border-2 border-blue-400 bg-white p-1 shadow-lg">
-                    <input
-                      autoFocus
-                      type="text"
-                      value={draftText}
-                      onChange={(e) => setDraftText(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") confirmText();
-                        if (e.key === "Escape") setAddingText(null);
-                      }}
-                      placeholder="输入文字后回车"
-                      className="w-40 rounded border-none px-2 py-1 text-sm outline-none"
-                      style={{ color: textColor, fontSize: `${fontSize * 0.6}px` }}
-                    />
-                    <button
-                      type="button"
-                      onClick={confirmText}
-                      className="rounded bg-blue-600 px-2 py-0.5 text-xs text-white hover:bg-blue-700"
-                    >
-                      确认
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setAddingText(null)}
-                      className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-300"
-                    >
-                      ✕
-                    </button>
-                  </div>
+                <div className="absolute z-30 flex items-center gap-1 rounded border-2 border-blue-400 bg-white p-1 shadow-lg" style={{ left: addingText.x / scale, top: addingText.y / scale }}>
+                  <input autoFocus value={draftText} onChange={e => setDraftText(e.target.value)} onKeyDown={e => { if (e.key === "Enter") addText(); if (e.key === "Escape") setAddingText(null); }} placeholder="输入文字…" className="w-40 border-none px-2 py-1 text-sm outline-none" style={{ color: textColor }} />
+                  <button type="button" onClick={addText} className="rounded bg-blue-600 px-1.5 py-0.5 text-xs text-white">✓</button>
+                  <button type="button" onClick={() => setAddingText(null)} className="rounded bg-gray-200 px-1.5 py-0.5 text-xs">✕</button>
                 </div>
               )}
             </div>
           </div>
 
-          {/* ===== 右侧标注列表 ===== */}
-          <div className="w-60 flex-shrink-0">
+          {/* 右侧标注列表 */}
+          <div className="w-52 flex-shrink-0">
             <div className="sticky top-4">
               <div className="mb-3 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-700">
-                  标注列表
-                  <span className="ml-1 font-normal text-gray-400">
-                    ({highlights.length + textAnnos.length})
-                  </span>
-                </h3>
-                <button
-                  type="button"
-                  onClick={() => { setHighlights([]); setTextAnnos([]); }}
-                  className="text-xs text-red-500 hover:underline"
-                >
-                  清除全部
-                </button>
+                <h3 className="text-sm font-semibold">标注列表 <span className="font-normal text-gray-400">({totalAnno})</span></h3>
+                <button type="button" onClick={() => { if (totalAnno === 0) return; pushUndo(); setMarks([]); setTexts([]); setStrokes([]); }} className="text-xs text-red-400 hover:underline">清空</button>
               </div>
-
-              <div className="max-h-96 space-y-1.5 overflow-y-auto">
-                {/* 当前页 */}
-                {curHL.length + curTA.length > 0 && (
-                  <div className="mb-2 text-xs text-gray-400">当前页</div>
-                )}
-                {curHL.map((h) => (
-                  <div key={h.id} className="flex items-center gap-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs">
-                    <div className="h-3 w-3 flex-shrink-0 rounded" style={{ backgroundColor: h.color }} />
-                    <span className="flex-1 truncate text-amber-800">高亮 ({h.rects.length}行)</span>
-                    <button type="button" onClick={() => removeHighlight(h.id)} className="text-amber-400 hover:text-red-500">✕</button>
-                  </div>
-                ))}
-                {curTA.map((a) => (
-                  <div key={a.id} className="flex items-center gap-2 rounded border border-blue-200 bg-blue-50 px-2 py-1.5 text-xs">
-                    <div className="h-3 w-3 flex-shrink-0 rounded-full" style={{ backgroundColor: a.color }} />
-                    <span className="flex-1 truncate text-blue-800">{a.text}</span>
-                    <button type="button" onClick={() => removeTextAnno(a.id)} className="text-blue-400 hover:text-red-500">✕</button>
-                  </div>
-                ))}
-
-                {/* 其他页 */}
-                {allHL.length + allTA.length > 0 && (
-                  <>
-                    <div className="mb-1 mt-3 text-xs text-gray-400">其他页</div>
-                    <p className="text-xs text-gray-400">
-                      共 {allHL.length + allTA.length} 个标注（仅显示当前页）
-                    </p>
-                  </>
-                )}
-
-                {highlights.length === 0 && textAnnos.length === 0 && (
-                  <p className="text-xs text-gray-300 py-6 text-center">
-                    还没有标注<br />
-                    {tool === "highlight" ? "拖拽文字添加高亮" : "点击页面添加文字"}
-                  </p>
-                )}
+              <div className="max-h-[60vh] space-y-1 overflow-y-auto">
+                {curM.map(m => <div key={m.id} className="flex items-center gap-1.5 rounded border px-2 py-1 text-xs"><div className="h-2.5 w-2.5 rounded flex-shrink-0" style={{ backgroundColor: m.color }} /><span className="flex-1 truncate">{m.type === "highlight" ? "高亮" : m.type === "underline" ? "下划线" : "删除线"}</span><button type="button" onClick={() => deleteAnno("mark", m.id)} className="text-gray-300 hover:text-red-500">×</button></div>)}
+                {curS.map(s => <div key={s.id} className="flex items-center gap-1.5 rounded border px-2 py-1 text-xs"><div className="h-2.5 w-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: s.color }} /><span className="flex-1 truncate">画笔</span><button type="button" onClick={() => deleteAnno("stroke", s.id)} className="text-gray-300 hover:text-red-500">×</button></div>)}
+                {curT.map(t => <div key={t.id} className="flex items-center gap-1.5 rounded border px-2 py-1 text-xs"><div className="h-2.5 w-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: t.color }} /><span className="flex-1 truncate">{t.text}</span><button type="button" onClick={() => deleteAnno("text", t.id)} className="text-gray-300 hover:text-red-500">×</button></div>)}
+                {totalAnno === 0 && <p className="py-6 text-center text-xs text-gray-300">暂无标注</p>}
               </div>
             </div>
           </div>

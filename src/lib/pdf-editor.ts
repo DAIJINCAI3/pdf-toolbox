@@ -1,5 +1,6 @@
 /**
- * PDF 编辑器引擎 v2 — 文字级高亮 + 原位文字标注
+ * PDF 编辑器引擎 v3 — 现代标注系统
+ * 文字选中+浮动工具栏 / 自由画笔 / 便签 / 撤销重做
  */
 
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
@@ -18,131 +19,89 @@ export interface TextAnnotation {
   color: string;
 }
 
-export interface HighlightRange {
+export interface MarkAnnotation {
   id: string;
   pageNum: number;
-  /** 高亮矩形的每个 segment（一行可能多个矩形） */
+  type: "highlight" | "underline" | "strikethrough";
   rects: { x: number; y: number; w: number; h: number }[];
   color: string;
 }
 
-/** getTextContent 返回的精确文字块 */
+export interface PenStroke {
+  id: string;
+  pageNum: number;
+  points: { x: number; y: number }[];
+  color: string;
+  width: number;
+}
+
 export interface TextItem {
   text: string;
-  x: number;   // canvas 坐标
-  y: number;
-  w: number;
-  h: number;
-  fontSize: number;
+  x: number; y: number; w: number; h: number; fontSize: number;
 }
 
 /* ================================================================
-   页面渲染 + 文字提取
+   渲染
    ================================================================ */
 
 export async function renderPage(
-  buffer: ArrayBuffer,
-  pageNum: number,
-  canvas: HTMLCanvasElement,
-  scale: number = 1.5
+  buffer: ArrayBuffer, pageNum: number, canvas: HTMLCanvasElement, scale = 1.5
 ): Promise<{ width: number; height: number; textItems: TextItem[] }> {
   const pdfjsLib = await import("pdfjs-dist");
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "https://unpkg.com/pdfjs-dist@6.0.227/build/pdf.worker.min.mjs";
-
-  const dataCopy = buffer.slice(0);
-  const pdf = await pdfjsLib.getDocument({
-    data: new Uint8Array(dataCopy),
-    disableAutoFetch: true,
-  }).promise;
-
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@6.0.227/build/pdf.worker.min.mjs";
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer.slice(0)), disableAutoFetch: true }).promise;
   const page = await pdf.getPage(pageNum);
-  const viewport = page.getViewport({ scale });
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
+  const vp = page.getViewport({ scale });
+  canvas.width = vp.width; canvas.height = vp.height;
   const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  await page.render({ canvas, viewport }).promise;
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvas, viewport: vp }).promise;
 
-  // 提取文字块（用于精确高亮匹配）
   const tc = await page.getTextContent();
-  const textItems: TextItem[] = [];
-
+  const items: TextItem[] = [];
   for (const item of tc.items) {
     if (!("str" in item) || !item.str.trim()) continue;
     const t = item.transform;
-
-    textItems.push({
-      text: item.str,
-      x: t[4] * scale,
-      y: (viewport.height - t[5]) * scale - (item.height || 0) * scale,
-      w: (item.width || 0) * scale,
-      h: (item.height || Math.abs(t[3])) * scale,
-      fontSize: Math.abs(t[3]) * scale,
-    });
+    items.push({ text: item.str, x: t[4] * scale, y: (vp.height - t[5]) * scale - (item.height || 0) * scale, w: (item.width || 0) * scale, h: (item.height || Math.abs(t[3])) * scale, fontSize: Math.abs(t[3]) * scale });
   }
-
-  return { width: viewport.width, height: viewport.height, textItems };
+  return { width: vp.width, height: vp.height, textItems: items };
 }
 
 export async function getTotalPages(buffer: ArrayBuffer): Promise<number> {
   const pdfjsLib = await import("pdfjs-dist");
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "https://unpkg.com/pdfjs-dist@6.0.227/build/pdf.worker.min.mjs";
-  const dataCopy = buffer.slice(0);
-  const pdf = await pdfjsLib.getDocument({
-    data: new Uint8Array(dataCopy),
-    disableAutoFetch: true,
-  }).promise;
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@6.0.227/build/pdf.worker.min.mjs";
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer.slice(0)), disableAutoFetch: true }).promise;
   return pdf.numPages;
 }
 
 /* ================================================================
-   高亮匹配：根据鼠标拖拽区域 → 找出覆盖的文字块
+   文字匹配高亮矩形
    ================================================================ */
 
-export function findHighlightRects(
-  selectionBox: { x: number; y: number; w: number; h: number },
-  textItems: TextItem[]
+export function findMarkRects(
+  sel: { x: number; y: number; w: number; h: number },
+  items: TextItem[]
 ): { x: number; y: number; w: number; h: number }[] {
-  const sx1 = selectionBox.x;
-  const sy1 = selectionBox.y;
-  const sx2 = selectionBox.x + selectionBox.w;
-  const sy2 = selectionBox.y + selectionBox.h;
-
-  const matched = textItems.filter((t) => {
-    const tx2 = t.x + t.w;
-    const ty2 = t.y + t.h;
-    // 文字块与选区有交集
-    return t.x < sx2 && tx2 > sx1 && t.y < sy2 && ty2 > sy1;
+  const sx2 = sel.x + sel.w, sy2 = sel.y + sel.h;
+  const matched = items.filter(t => {
+    const tx2 = t.x + t.w, ty2 = t.y + t.h;
+    return t.x < sx2 && tx2 > sel.x && t.y < sy2 && ty2 > sel.y;
   });
+  if (!matched.length) return [];
 
-  if (matched.length === 0) return [];
-
-  // 合并同一行的文字块为连续矩形
   matched.sort((a, b) => a.y - b.y || a.x - b.x);
-  const rects: { x: number; y: number; w: number; h: number }[] = [];
-  let curX = matched[0].x, curY = matched[0].y, curW = matched[0].w, curH = matched[0].h;
-  let baseY = matched[0].y;
-
+  const out: { x: number; y: number; w: number; h: number }[] = [];
+  let cx = matched[0].x, cy = matched[0].y, cw = matched[0].w, ch = matched[0].h, by = matched[0].y;
   for (let i = 1; i < matched.length; i++) {
     const t = matched[i];
-    if (Math.abs(t.y - baseY) < curH * 0.5
-        && t.x - (curX + curW) < t.fontSize * 2) {
-      const x2 = Math.max(curX + curW, t.x + t.w);
-      curW = x2 - curX;
-      curY = Math.min(curY, t.y);
-      curH = Math.max(curH, t.h);
+    if (Math.abs(t.y - by) < ch * 0.5 && t.x - (cx + cw) < t.fontSize * 2) {
+      cw = Math.max(cx + cw, t.x + t.w) - cx; cy = Math.min(cy, t.y); ch = Math.max(ch, t.h);
     } else {
-      rects.push({ x: curX, y: curY, w: curW, h: curH });
-      curX = t.x; curY = t.y; curW = t.w; curH = t.h;
-      baseY = t.y;
+      out.push({ x: cx, y: cy, w: cw, h: ch }); cx = t.x; cy = t.y; cw = t.w; ch = t.h; by = t.y;
     }
   }
-  rects.push({ x: curX, y: curY, w: curW, h: curH });
-
-  return rects;
+  out.push({ x: cx, y: cy, w: cw, h: ch });
+  return out;
 }
 
 /* ================================================================
@@ -150,59 +109,43 @@ export function findHighlightRects(
    ================================================================ */
 
 export async function saveEditedPDF(
-  buffer: ArrayBuffer,
-  textAnnos: TextAnnotation[],
-  highlights: HighlightRange[],
-  scale: number = 1.5
+  buffer: ArrayBuffer, texts: TextAnnotation[], marks: MarkAnnotation[],
+  strokes: PenStroke[], scale = 1.5
 ): Promise<Uint8Array> {
-  const pdfDoc = await PDFDocument.load(buffer.slice(0), { ignoreEncryption: true });
-  const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  const pages = pdfDoc.getPages();
+  const doc = await PDFDocument.load(buffer.slice(0), { ignoreEncryption: true });
+  const font = await doc.embedFont(StandardFonts.HelveticaBold);
+  const pages = doc.getPages();
 
-  for (const anno of textAnnos) {
-    const page = pages[anno.pageNum - 1];
-    if (!page) continue;
-    const { height } = page.getSize();
-    const pdfX = anno.x / scale;
-    const pdfY = height - anno.y / scale - anno.fontSize / scale * 0.5;
-    const c = hexToRgb(anno.color);
-    page.drawText(anno.text, {
-      x: Math.max(pdfX, 10),
-      y: Math.max(pdfY, 10),
-      size: anno.fontSize / scale * 0.75,
-      font,
-      color: rgb(c.r, c.g, c.b),
-    });
+  for (const a of texts) {
+    const pg = pages[a.pageNum - 1]; if (!pg) continue;
+    const { height: ph } = pg.getSize();
+    const c = hexRgb(a.color);
+    pg.drawText(a.text, { x: Math.max(a.x / scale, 10), y: Math.max(ph - a.y / scale - a.fontSize / scale * 0.5, 10), size: a.fontSize / scale * 0.75, font, color: rgb(c.r, c.g, c.b) });
   }
 
-  for (const hl of highlights) {
-    const page = pages[hl.pageNum - 1];
-    if (!page) continue;
-    const { height: ph } = page.getSize();
-    const c = hexToRgb(hl.color);
-
-    for (const r of hl.rects) {
-      const x = r.x / scale;
-      const y = ph - r.y / scale - r.h / scale;
-      page.drawRectangle({
-        x: Math.max(x, 0),
-        y: Math.max(y, 0),
-        width: r.w / scale,
-        height: r.h / scale,
-        color: rgb(c.r, c.g, c.b),
-        opacity: 0.35,
-      });
+  for (const m of marks) {
+    const pg = pages[m.pageNum - 1]; if (!pg) continue;
+    const { height: ph } = pg.getSize();
+    const c = hexRgb(m.color);
+    for (const r of m.rects) {
+      const x = r.x / scale, w = r.w / scale, y = ph - r.y / scale - r.h / scale, h = r.h / scale;
+      if (m.type === "highlight") { pg.drawRectangle({ x, y, width: w, height: h, color: rgb(c.r, c.g, c.b), opacity: 0.35 }); }
+      if (m.type === "underline") { pg.drawLine({ start: { x, y }, end: { x: x + w, y }, thickness: 2, color: rgb(c.r, c.g, c.b) }); }
+      if (m.type === "strikethrough") { const mid = y + h / 2; pg.drawLine({ start: { x, y: mid }, end: { x: x + w, y: mid }, thickness: 2, color: rgb(c.r, c.g, c.b) }); }
     }
   }
 
-  return pdfDoc.save();
+  for (const s of strokes) {
+    const pg = pages[s.pageNum - 1]; if (!pg || s.points.length < 2) continue;
+    const { height: ph } = pg.getSize();
+    const c = hexRgb(s.color);
+    for (let i = 1; i < s.points.length; i++) {
+      const p0 = s.points[i - 1], p1 = s.points[i];
+      pg.drawLine({ start: { x: p0.x / scale, y: ph - p0.y / scale }, end: { x: p1.x / scale, y: ph - p1.y / scale }, thickness: s.width / scale, color: rgb(c.r, c.g, c.b), opacity: 0.8 });
+    }
+  }
+
+  return doc.save();
 }
 
-function hexToRgb(hex: string): { r: number; g: number; b: number } {
-  const c = hex.replace("#", "");
-  return {
-    r: parseInt(c.slice(0, 2), 16) / 255,
-    g: parseInt(c.slice(2, 4), 16) / 255,
-    b: parseInt(c.slice(4, 6), 16) / 255,
-  };
-}
+function hexRgb(h: string) { const c = h.replace("#", ""); return { r: parseInt(c.slice(0, 2), 16) / 255, g: parseInt(c.slice(2, 4), 16) / 255, b: parseInt(c.slice(4, 6), 16) / 255 }; }
