@@ -83,15 +83,15 @@ function SortableFileItem({
       </span>
 
       {/* 第一页缩略图 */}
-      <div className="h-16 w-12 flex-shrink-0 overflow-hidden rounded border border-gray-200 bg-gray-100">
+      <div className="h-24 w-20 flex-shrink-0 overflow-hidden rounded border border-gray-200 bg-gray-100">
         {entry.thumbnail ? (
           <img
             src={entry.thumbnail}
             alt={`预览`}
-            className="h-full w-full object-cover"
+            className="h-full w-full object-contain"
           />
         ) : (
-          <div className="flex h-full items-center justify-center text-xs text-gray-400">
+          <div className="flex h-full items-center justify-center text-2xl text-gray-300">
             📄
           </div>
         )}
@@ -140,12 +140,12 @@ export default function MergePage() {
       const arrayBuffer = await file.arrayBuffer();
       const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
       const page = await pdf.getPage(1);
-      const viewport = page.getViewport({ scale: 0.2 });
+      const viewport = page.getViewport({ scale: 0.6 });
       const canvas = document.createElement("canvas");
       canvas.width = viewport.width;
       canvas.height = viewport.height;
       await page.render({ canvas, viewport }).promise;
-      return canvas.toDataURL("image/jpeg", 0.6);
+      return canvas.toDataURL("image/jpeg", 0.8);
     } catch {
       return null; // 非 PDF 或损坏的文件不显示缩略图
     }
