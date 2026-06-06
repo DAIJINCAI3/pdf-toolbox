@@ -32,6 +32,12 @@ const tools = [
     icon: "🤖",
     href: "/tools/ai",
   },
+  {
+    title: "格式互转",
+    description: "PDF 转 Word / Excel / PPT",
+    icon: "🔄",
+    href: "/tools/convert",
+  },
 ];
 
 export default function HomePage() {
@@ -53,7 +59,7 @@ export default function HomePage() {
       </div>
 
       {/* 功能卡片网格 */}
-      <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {tools.map((tool) => (
           <ToolCard key={tool.href} {...tool} />
         ))}

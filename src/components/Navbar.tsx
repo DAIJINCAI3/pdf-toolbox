@@ -23,7 +23,13 @@ export default function Navbar() {
             href="/tools/ai"
             className="text-gray-600 no-underline hover:text-blue-600"
           >
-            🤖 AI
+            AI
+          </Link>
+          <Link
+            href="/tools/convert"
+            className="text-gray-600 no-underline hover:text-blue-600"
+          >
+            转换
           </Link>
           <Link
             href="/pricing"
