@@ -149,7 +149,7 @@ export default function EditPage() {
     setHighlights([]);
 
     const buf = await f.arrayBuffer();
-    fileBufferRef.current = buf;
+    fileBufferRef.current = buf.slice(0); // 拷贝一份，防止被 pdfjs worker detach
 
     try {
       const total = await getTotalPages(buf);

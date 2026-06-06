@@ -48,7 +48,7 @@ export default function SplitPage() {
 
       try {
         const arrayBuffer = await file!.arrayBuffer();
-        const pdf = await pdfjsLib!.getDocument({ data: arrayBuffer }).promise;
+        const pdf = await pdfjsLib!.getDocument({ data: arrayBuffer.slice(0) }).promise;
         if (cancelled) return;
 
         const pages = pdf.numPages;

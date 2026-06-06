@@ -47,7 +47,7 @@ async function extractLines(
   let pdf: any;
   try {
     const loadingTask = pdfjsLib.getDocument({
-      data: new Uint8Array(buffer),
+      data: new Uint8Array(buffer.slice(0)),
       disableAutoFetch: true,
     });
     pdf = await loadingTask.promise;

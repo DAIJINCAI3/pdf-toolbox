@@ -50,8 +50,11 @@ export async function renderPage(
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     "https://unpkg.com/pdfjs-dist@6.0.227/build/pdf.worker.min.mjs";
 
+  // 复制 buffer 防止 pdfjs worker 将其 detach
+  const dataCopy = buffer.slice(0);
+
   const pdf = await pdfjsLib.getDocument({
-    data: new Uint8Array(buffer),
+    data: new Uint8Array(dataCopy),
     disableAutoFetch: true,
   }).promise;
 
@@ -78,8 +81,9 @@ export async function getTotalPages(buffer: ArrayBuffer): Promise<number> {
   const pdfjsLib = await import("pdfjs-dist");
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     "https://unpkg.com/pdfjs-dist@6.0.227/build/pdf.worker.min.mjs";
+  const dataCopy = buffer.slice(0);
   const pdf = await pdfjsLib.getDocument({
-    data: new Uint8Array(buffer),
+    data: new Uint8Array(dataCopy),
     disableAutoFetch: true,
   }).promise;
   return pdf.numPages;
@@ -95,7 +99,7 @@ export async function saveEditedPDF(
   highlightRects: HighlightRect[],
   scale: number = 1.5
 ): Promise<Uint8Array> {
-  const pdfDoc = await PDFDocument.load(buffer, { ignoreEncryption: true });
+  const pdfDoc = await PDFDocument.load(buffer.slice(0), { ignoreEncryption: true });
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 

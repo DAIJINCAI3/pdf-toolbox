@@ -151,7 +151,7 @@ export default function MergePage() {
       const pdfjsLib = await import("pdfjs-dist");
 
       const arrayBuffer = await file.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
       const page = await pdf.getPage(1);
       const viewport = page.getViewport({ scale: 1.5 });
       const canvas = document.createElement("canvas");
