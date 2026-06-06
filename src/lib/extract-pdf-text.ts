@@ -1,32 +1,30 @@
 /**
  * 用 pdfjs-dist 提取 PDF 文本
- * 纯 Node.js 环境可用（API Routes）
+ * Node.js 服务器端环境（Next.js API Routes）
  */
 
-let workerSrcSet = false;
-
 export async function extractPDFText(buffer: ArrayBuffer): Promise<string> {
-  const pdfjsLib = await import("pdfjs-dist");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pdfjsLib = (await import("pdfjs-dist/legacy/build/pdf.mjs")) as any;
 
-  if (!workerSrcSet) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc =
-      "https://unpkg.com/pdfjs-dist@6.0.227/build/pdf.worker.min.mjs";
-    workerSrcSet = true;
-  }
-
-  const pdf = await pdfjsLib.getDocument({
+  const loadingTask = pdfjsLib.getDocument({
     data: new Uint8Array(buffer),
-    useWorkerFetch: true,
-  }).promise;
+    disableAutoFetch: true,
+    disableStream: true,
+    useWorkerFetch: false,
+    useSystemFonts: true,
+  });
+
+  const pdf = await loadingTask.promise;
 
   const texts: string[] = [];
-  const pageCount = pdf.numPages;
 
-  for (let i = 1; i <= pageCount; i++) {
+  for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
     const pageText = content.items
-      .map((item) => ("str" in item ? item.str : ""))
+      .filter((item: any) => "str" in item)
+      .map((item: any) => item.str as string)
       .join(" ");
     texts.push(pageText);
   }

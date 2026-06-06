@@ -28,9 +28,11 @@ export async function POST(req: NextRequest) {
       try {
         const { extractPDFText } = await import("@/lib/extract-pdf-text");
         text = await extractPDFText(bytes);
-      } catch {
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "未知错误";
+        console.error("PDF 文本提取失败:", msg);
         return NextResponse.json(
-          { error: "无法解析该 PDF 文件，请确认文件是文本型 PDF（非扫描图片）" },
+          { error: `无法解析该 PDF：${msg}` },
           { status: 400 }
         );
       }
