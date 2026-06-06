@@ -3,14 +3,44 @@
 import { useState, useCallback } from "react";
 import FileUploader from "@/components/FileUploader";
 import { compressPDF, formatFileSize } from "@/lib/compress-pdf";
+import type { CompressionLevel, CompressionResult } from "@/lib/compress-pdf";
 import { downloadPDF } from "@/lib/merge-pdf";
+
+/** 三个压缩级别的配置 */
+const COMPRESSION_LEVELS: {
+  key: CompressionLevel;
+  label: string;
+  icon: string;
+  desc: string;
+}[] = [
+  {
+    key: "light",
+    label: "轻度",
+    icon: "🖼️",
+    desc: "高画质，压缩约 10-20%，适合需要保持原图质量的文档",
+  },
+  {
+    key: "recommended",
+    label: "推荐",
+    icon: "⚖️",
+    desc: "平衡画质与体积，压缩约 20-40%，适合大多数场景",
+  },
+  {
+    key: "extreme",
+    label: "极限",
+    icon: "🗜️",
+    desc: "最大压缩，可能降低图片清晰度，适合纯文本或图片不重要的文档",
+  },
+];
 
 export default function CompressPage() {
   const [file, setFile] = useState<File | null>(null);
+  const [level, setLevel] = useState<CompressionLevel>("recommended");
   const [processing, setProcessing] = useState(false);
   const [result, setResult] = useState<{
     originalSize: number;
     compressedSize: number;
+    strategy: string;
   } | null>(null);
   const [compressedData, setCompressedData] = useState<Uint8Array | null>(null);
   const [error, setError] = useState("");
@@ -31,11 +61,12 @@ export default function CompressPage() {
     setError("");
 
     try {
-      const data = await compressPDF(file);
-      setCompressedData(data);
+      const output = await compressPDF(file, level);
+      setCompressedData(output.data);
       setResult({
         originalSize: file.size,
-        compressedSize: data.byteLength,
+        compressedSize: output.data.byteLength,
+        strategy: output.strategyUsed,
       });
     } catch (e) {
       setError("压缩失败：" + (e instanceof Error ? e.message : "未知错误"));
@@ -47,7 +78,8 @@ export default function CompressPage() {
   const handleDownload = () => {
     if (!compressedData || !file) return;
     const name = file.name.replace(/\.pdf$/i, "");
-    downloadPDF(compressedData, `${name}_压缩版.pdf`);
+    const suffix = level === "light" ? "轻度" : level === "extreme" ? "极限" : "压缩";
+    downloadPDF(compressedData, `${name}_${suffix}版.pdf`);
   };
 
   const compressionRatio = result
@@ -92,6 +124,40 @@ export default function CompressPage() {
             </p>
           </div>
 
+          {/* ===== 压缩级别选择器 ===== */}
+          <div className="mt-5">
+            <h3 className="mb-3 text-sm font-semibold text-gray-700">
+              选择压缩级别
+            </h3>
+            <div className="space-y-2">
+              {COMPRESSION_LEVELS.map((opt) => (
+                <label
+                  key={opt.key}
+                  className={`flex cursor-pointer items-start gap-3 rounded-lg border-2 p-3 transition-all ${
+                    level === opt.key
+                      ? "border-blue-500 bg-blue-50"
+                      : "border-gray-200 bg-white hover:border-gray-300"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="compressionLevel"
+                    value={opt.key}
+                    checked={level === opt.key}
+                    onChange={() => setLevel(opt.key)}
+                    className="mt-0.5 accent-blue-600"
+                  />
+                  <div className="flex-1">
+                    <span className="font-medium text-gray-900">
+                      {opt.icon} {opt.label}
+                    </span>
+                    <p className="mt-0.5 text-xs text-gray-500">{opt.desc}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+
           {/* 结果展示 */}
           {result && (
             <div className="mt-4 rounded-lg border border-green-200 bg-green-50 p-4">
@@ -106,6 +172,9 @@ export default function CompressPage() {
                 {formatFileSize(result.originalSize - result.compressedSize)}
                 {"）"}
               </p>
+              <p className="mt-1 text-xs text-green-500">
+                策略：{result.strategy}
+              </p>
             </div>
           )}
 
@@ -118,7 +187,7 @@ export default function CompressPage() {
                 disabled={processing}
                 className="flex-1 rounded-lg bg-blue-600 py-3 font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {processing ? "压缩中..." : "开始压缩"}
+                {processing ? "压缩中..." : `开始${COMPRESSION_LEVELS.find(l => l.key === level)?.label}压缩`}
               </button>
             ) : (
               <button
