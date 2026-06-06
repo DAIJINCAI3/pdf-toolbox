@@ -64,22 +64,18 @@ function SortableFileItem({
   return (
     <div
       ref={setNodeRef}
+      {...attributes}
+      {...listeners}
       style={style}
-      className="flex items-start gap-3 rounded-lg border border-gray-200 bg-white p-4 shadow-sm"
+      className="flex cursor-grab touch-none items-start gap-3 rounded-lg border border-gray-200 bg-white p-4 shadow-sm active:cursor-grabbing hover:border-blue-300 hover:shadow-md"
     >
-      {/* 拖拽手柄 */}
-      <button
-        {...attributes}
-        {...listeners}
-        type="button"
-        className="mt-8 cursor-grab touch-none text-xl text-gray-400 hover:text-gray-600 active:cursor-grabbing"
-        title="拖拽排序"
-      >
+      {/* 拖拽指示标记 */}
+      <span className="mt-8 text-xl text-gray-300 select-none">
         ⋮⋮
-      </button>
+      </span>
 
       {/* 序号 */}
-      <span className="mt-8 w-5 text-center text-sm font-bold text-gray-400">
+      <span className="mt-8 w-5 text-center text-sm font-bold text-gray-400 select-none">
         {index + 1}
       </span>
 
@@ -107,7 +103,7 @@ function SortableFileItem({
           {(entry.file.size / 1024 / 1024).toFixed(2)} MB
         </p>
         <p className="mt-3 text-xs text-gray-400">
-          ⋮⋮ 拖拽调整顺序
+          按住任意位置拖拽调整顺序
         </p>
       </div>
 
@@ -115,7 +111,9 @@ function SortableFileItem({
       <button
         type="button"
         onClick={() => onRemove(entry.id)}
-        className="mt-1 flex-shrink-0 rounded-full p-1 text-red-400 hover:bg-red-50 hover:text-red-600"
+        onPointerDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => e.stopPropagation()}
+        className="mt-1 flex-shrink-0 cursor-pointer rounded-full p-1 text-red-400 hover:bg-red-50 hover:text-red-600"
         title="移除"
       >
         ✕
