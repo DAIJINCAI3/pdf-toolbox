@@ -3,20 +3,27 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import FileUploader from "@/components/FileUploader";
 import {
-  renderPage, getTotalPages, saveEditedPDF,
-  type TextAnnotation, type HighlightRect,
+  renderPage, getTotalPages, saveEditedPDF, findHighlightRects,
+  type TextAnnotation, type HighlightRange, type TextItem,
 } from "@/lib/pdf-editor";
 import { downloadPDF } from "@/lib/merge-pdf";
 
 /* ================================================================
-   颜色选择器
+   常量
    ================================================================ */
 
-const COLORS = [
+const HL_COLORS = [
+  { hex: "#fde047", label: "黄色", border: "#eab308" },
+  { hex: "#fca5a5", label: "红色", border: "#ef4444" },
+  { hex: "#a5f3fc", label: "青色", border: "#06b6d4" },
+  { hex: "#bbf7d0", label: "绿色", border: "#22c55e" },
+];
+
+const TEXT_COLORS = [
   { hex: "#cc0000", label: "红" },
   { hex: "#2563eb", label: "蓝" },
   { hex: "#16a34a", label: "绿" },
-  { hex: "#ea580c", label: "橙" },
+  { hex: "#1e293b", label: "黑" },
 ];
 
 /* ================================================================
@@ -25,116 +32,144 @@ const COLORS = [
 
 export default function EditPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const fileBufferRef = useRef<ArrayBuffer | null>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const bufferRef = useRef<ArrayBuffer | null>(null);
+  const textItemsRef = useRef<TextItem[]>([]);
 
   const [file, setFile] = useState<File | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(0);
+  const [pageSize, setPageSize] = useState({ w: 0, h: 0 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  // 工具模式：text | highlight
-  const [tool, setTool] = useState<"text" | "highlight">("text");
-  const [textColor, setTextColor] = useState("#cc0000");
-  const [highColor, setHighColor] = useState("#fde047");
-  const [fontSize, setFontSize] = useState(18);
+  // 工具
+  const [tool, setTool] = useState<"highlight" | "text">("highlight");
+  const [hlColor, setHlColor] = useState(HL_COLORS[0]);
+  const [textColor, setTextColor] = useState(TEXT_COLORS[0].hex);
+  const [fontSize, setFontSize] = useState(16);
 
   // 标注数据
+  const [highlights, setHighlights] = useState<HighlightRange[]>([]);
   const [textAnnos, setTextAnnos] = useState<TextAnnotation[]>([]);
-  const [highlights, setHighlights] = useState<HighlightRect[]>([]);
 
-  // 拖拽起点（高亮用）
-  const dragRef = useRef<{ x: number; y: number } | null>(null);
-  const [dragRect, setDragRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  // 拖拽状态
+  const [selecting, setSelecting] = useState(false);
+  const [selStart, setSelStart] = useState({ x: 0, y: 0 });
+  const [selEnd, setSelEnd] = useState({ x: 0, y: 0 });
 
-  // 唯一 ID
+  // 文字添加状态
+  const [addingText, setAddingText] = useState<{ x: number; y: number } | null>(null);
+  const [draftText, setDraftText] = useState("");
+
+  // 选中文字（用于高亮）
   const idRef = useRef(0);
-  const nextId = () => `ann-${++idRef.current}`;
+  const nextId = () => `a-${++idRef.current}`;
+
+  /** 高亮颜色 → 边框颜色 */
+  function hlColorsBorder(hex: string): string {
+    const map: Record<string, string> = { "#fde047": "#eab308", "#fca5a5": "#ef4444", "#a5f3fc": "#06b6d4", "#bbf7d0": "#22c55e" };
+    return map[hex] || "#888888";
+  }
+
+  // scale 写死 1.5，与 renderPage 保持一致
+  const SCALE = 1.5;
 
   /* ================================================================
-     页面渲染
+     渲染
      ================================================================ */
 
-  const doRender = async (pageNum: number, buf?: ArrayBuffer) => {
-    const buffer = buf ?? fileBufferRef.current;
-    if (!buffer || !canvasRef.current) return;
-
+  const renderCurrentPage = useCallback(async (buf: ArrayBuffer, page: number) => {
+    if (!canvasRef.current) return;
     setLoading(true);
-    setError("");
-
     try {
-      const info = await renderPage(buffer, pageNum, canvasRef.current, 1.5);
-      setCurrentPage(info.pageNum);
-      // 渲染完成后由 useEffect 负责画标注
+      const result = await renderPage(buf, page, canvasRef.current, SCALE);
+      textItemsRef.current = result.textItems;
+      setPageSize({ w: result.width, h: result.height });
+      drawAnnotations();
     } catch (e) {
       setError("渲染失败：" + (e instanceof Error ? e.message : ""));
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  /* ================================================================
-     标注绘制
-     ================================================================ */
+  // 每次标注/页码变化后重绘标注
+  useEffect(() => {
+    drawAnnotations();
+  }, [highlights, textAnnos, currentPage, selecting, selEnd]);
 
-  function drawAnnotationsOverlay() {
+  function drawAnnotations() {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    // 重新渲染基础页面
+    if (bufferRef.current) {
+      renderPage(bufferRef.current, currentPage, canvas, SCALE).then((result) => {
+        textItemsRef.current = result.textItems;
+        setPageSize({ w: result.width, h: result.height });
 
-    // 文字标注
-    for (const a of textAnnos) {
-      if (a.pageNum !== currentPage) continue;
-      ctx.save();
-      ctx.font = `bold ${a.fontSize}px "Microsoft YaHei", sans-serif`;
-      ctx.fillStyle = a.color;
-      // 文字阴影提升可读性
-      ctx.shadowColor = "rgba(255,255,255,0.9)";
-      ctx.shadowBlur = 3;
-      ctx.fillText(a.text, a.x, a.y);
-      ctx.restore();
-    }
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
 
-    // 高亮矩形
-    for (const h of highlights) {
-      if (h.pageNum !== currentPage) continue;
-      ctx.save();
-      ctx.fillStyle = h.color;
-      ctx.globalAlpha = h.opacity;
-      ctx.fillRect(h.x, h.y, h.w, h.h);
-      ctx.restore();
-    }
+        // 高亮
+        for (const hl of highlights) {
+          if (hl.pageNum !== currentPage) continue;
+          ctx.save();
+          for (const r of hl.rects) {
+            ctx.fillStyle = hl.color;
+            ctx.globalAlpha = 0.35;
+            ctx.fillRect(r.x, r.y, r.w, r.h);
+            ctx.globalAlpha = 1;
+            ctx.strokeStyle = hlColorsBorder(hl.color);
+            ctx.lineWidth = 1;
+            ctx.strokeRect(r.x, r.y, r.w, r.h);
+          }
+          ctx.restore();
+        }
 
-    // 拖拽中的预览矩形
-    if (dragRect && dragRect.w > 1 && dragRect.h > 1) {
-      ctx.save();
-      ctx.strokeStyle = highColor;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([5, 3]);
-      ctx.fillStyle = highColor;
-      ctx.globalAlpha = 0.2;
-      ctx.fillRect(dragRect.x, dragRect.y, dragRect.w, dragRect.h);
-      ctx.globalAlpha = 1;
-      ctx.strokeRect(dragRect.x, dragRect.y, dragRect.w, dragRect.h);
-      ctx.restore();
+        // 文字标注
+        for (const a of textAnnos) {
+          if (a.pageNum !== currentPage) continue;
+          ctx.save();
+          ctx.font = `bold ${a.fontSize}px "Microsoft YaHei", sans-serif`;
+          ctx.shadowColor = "rgba(255,255,255,0.85)";
+          ctx.shadowBlur = 4;
+          ctx.fillStyle = a.color;
+          ctx.fillText(a.text, a.x, a.y);
+          ctx.restore();
+        }
+
+        // 拖拽选区的实时预览
+        if (selecting) {
+          const box = getSelectionBox();
+          if (box.w > 3 || box.h > 3) {
+            const rects = findHighlightRects(box, textItemsRef.current);
+            ctx.save();
+            ctx.fillStyle = hlColor.hex;
+            ctx.globalAlpha = 0.25;
+            ctx.strokeStyle = hlColor.border;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 2]);
+            for (const r of rects) {
+              ctx.fillRect(r.x, r.y, r.w, r.h);
+              ctx.strokeRect(r.x, r.y, r.w, r.h);
+            }
+            ctx.restore();
+          }
+        }
+      });
     }
   }
 
-  // 标注变化后：重新渲染页面 + 标注 overlay
-  const [needsRedraw, setNeedsRedraw] = useState(0);
-  const triggerRedraw = () => setNeedsRedraw((n) => n + 1);
-
-  useEffect(() => {
-    if (!fileBufferRef.current || !canvasRef.current || !file) return;
-    let cancelled = false;
-    (async () => {
-      await renderPage(fileBufferRef.current!, currentPage, canvasRef.current!, 1.5);
-      if (!cancelled) drawAnnotationsOverlay();
-    })();
-    return () => { cancelled = true; };
-  }, [currentPage, needsRedraw, file]);
+  function getSelectionBox() {
+    return {
+      x: Math.min(selStart.x, selEnd.x),
+      y: Math.min(selStart.y, selEnd.y),
+      w: Math.abs(selEnd.x - selStart.x),
+      h: Math.abs(selEnd.y - selStart.y),
+    };
+  }
 
   /* ================================================================
      文件加载
@@ -142,114 +177,132 @@ export default function EditPage() {
 
   const handleFileSelected = useCallback(async (files: File[]) => {
     if (files.length === 0) return;
-
     const f = files[0];
     setFile(f);
-    setTextAnnos([]);
     setHighlights([]);
+    setTextAnnos([]);
+    setCurrentPage(1);
+    setError("");
 
     const buf = await f.arrayBuffer();
-    fileBufferRef.current = buf.slice(0); // 拷贝一份，防止被 pdfjs worker detach
+    bufferRef.current = buf.slice(0); // 拷贝，防止 pdfjs worker detach
 
     try {
       const total = await getTotalPages(buf);
       setTotalPages(total);
-      setCurrentPage(1); // useEffect 会自动渲染
-      if (canvasRef.current) {
-        await renderPage(buf, 1, canvasRef.current, 1.5);
-        drawAnnotationsOverlay();
-      }
+      await renderCurrentPage(bufferRef.current, 1);
     } catch (e) {
-      setError("无法加载 PDF：" + (e instanceof Error ? e.message : ""));
+      setError("无法加载：" + (e instanceof Error ? e.message : ""));
     }
-  }, []);
+  }, [renderCurrentPage]);
 
-  // 切换页面
-  const goPage = useCallback(async (p: number) => {
-    if (p < 1 || p > totalPages) return;
-    setCurrentPage(p); // useEffect 会自动渲染 + 画标注
-  }, [totalPages]);
+  const goPage = (p: number) => {
+    if (p < 1 || p > totalPages || !bufferRef.current) return;
+    setCurrentPage(p);
+    renderCurrentPage(bufferRef.current, p);
+  };
 
   /* ================================================================
-     Canvas 交互
+     Overlay 交互
      ================================================================ */
 
-  const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  const getEventPos = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!overlayRef.current) return { x: 0, y: 0 };
+    const rect = overlayRef.current.getBoundingClientRect();
+    // canvas 的 CSS 尺寸可能被缩放，需要换算到 canvas 实际像素
+    const scaleX = (canvasRef.current?.width || 1) / rect.width;
+    const scaleY = (canvasRef.current?.height || 1) / rect.height;
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top) * scaleY,
+    };
+  };
 
-    const rect = canvas.getBoundingClientRect();
-    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (tool === "text") {
+      const pos = getEventPos(e);
+      setAddingText(pos);
+      setDraftText("");
+      return;
+    }
 
     if (tool === "highlight") {
-      dragRef.current = { x, y };
-      setDragRect({ x, y, w: 0, h: 0 });
+      const pos = getEventPos(e);
+      setSelStart(pos);
+      setSelEnd(pos);
+      setSelecting(true);
     }
-  }, [tool]);
+  };
 
-  const handleCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!dragRef.current || !dragRect) return;
-
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-
-    setDragRect({
-      x: Math.min(dragRef.current.x, x),
-      y: Math.min(dragRef.current.y, y),
-      w: Math.abs(x - dragRef.current.x),
-      h: Math.abs(y - dragRef.current.y),
-    });
-  }, [dragRect]);
-
-  const handleCanvasMouseUp = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-
-    if (tool === "highlight" && dragRef.current && dragRect && dragRect.w > 5 && dragRect.h > 5) {
-      setHighlights((prev) => [
-        ...prev,
-        { id: nextId(), pageNum: currentPage, x: dragRect.x, y: dragRect.y, w: dragRect.w, h: dragRect.h, color: highColor, opacity: 0.35 },
-      ]);
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (tool === "highlight" && selecting) {
+      setSelEnd(getEventPos(e));
     }
+  };
 
-    if (tool === "text") {
-      const text = prompt("请输入要添加的文字：", "");
-      if (text && text.trim()) {
-        setTextAnnos((prev) => [
+  const handleMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (tool === "highlight" && selecting) {
+      setSelecting(false);
+      const end = getEventPos(e);
+      setSelEnd(end);
+
+      const box = {
+        x: Math.min(selStart.x, end.x),
+        y: Math.min(selStart.y, end.y),
+        w: Math.abs(end.x - selStart.x),
+        h: Math.abs(end.y - selStart.y),
+      };
+
+      const rects = findHighlightRects(box, textItemsRef.current);
+      if (rects.length > 0) {
+        setHighlights((prev) => [
           ...prev,
-          { id: nextId(), pageNum: currentPage, text: text.trim(), x, y, fontSize, color: textColor },
+          { id: nextId(), pageNum: currentPage, rects, color: hlColor.hex },
         ]);
       }
     }
-
-    dragRef.current = null;
-    setDragRect(null);
-    triggerRedraw();
-  }, [tool, currentPage, dragRect, highColor, textColor, fontSize]);
+  };
 
   /* ================================================================
-     保存
+     文字确认
      ================================================================ */
 
+  const confirmText = () => {
+    if (!addingText || !draftText.trim()) {
+      setAddingText(null);
+      return;
+    }
+
+    setTextAnnos((prev) => [
+      ...prev,
+      {
+        id: nextId(),
+        pageNum: currentPage,
+        text: draftText.trim(),
+        x: addingText.x,
+        y: addingText.y,
+        fontSize,
+        color: textColor,
+      },
+    ]);
+    setAddingText(null);
+    setDraftText("");
+  };
+
+  /* ================================================================
+     删除 + 保存
+     ================================================================ */
+
+  const removeHighlight = (id: string) => setHighlights((prev) => prev.filter((h) => h.id !== id));
+  const removeTextAnno = (id: string) => setTextAnnos((prev) => prev.filter((a) => a.id !== id));
+
   const handleSave = async () => {
-    if (!fileBufferRef.current) return;
-
+    if (!bufferRef.current || !file) return;
     setLoading(true);
-    setError("");
-
     try {
-      const data = await saveEditedPDF(fileBufferRef.current, textAnnos, highlights, 1.5);
-      const name = file?.name?.replace(/\.pdf$/i, "") || "edited";
-      downloadPDF(data, `${name}_编辑版.pdf`);
+      const data = await saveEditedPDF(bufferRef.current, textAnnos, highlights, SCALE);
+      const name = file.name.replace(/\.pdf$/i, "");
+      downloadPDF(data, `${name}_标注版.pdf`);
     } catch (e) {
       setError("保存失败：" + (e instanceof Error ? e.message : ""));
     } finally {
@@ -257,25 +310,21 @@ export default function EditPage() {
     }
   };
 
-  /* ================================================================
-     清除标注
-     ================================================================ */
-
-  const clearAnnotations = () => {
-    setTextAnnos([]);
-    setHighlights([]);
-    triggerRedraw();
-  };
+  // 当前页标注
+  const curHL = highlights.filter((h) => h.pageNum === currentPage);
+  const curTA = textAnnos.filter((a) => a.pageNum === currentPage);
+  const allHL = highlights.filter((h) => h.pageNum !== currentPage);
+  const allTA = textAnnos.filter((a) => a.pageNum !== currentPage);
 
   /* ================================================================
      UI
      ================================================================ */
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-10">
-      <div className="mb-8">
-        <h1 className="mb-2 text-2xl font-bold">✏️ 文档编辑</h1>
-        <p className="text-gray-500">在 PDF 上添加文字标注或高亮区域</p>
+    <div className="mx-auto max-w-6xl px-4 py-6">
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">✏️ PDF 标注编辑</h1>
+        <p className="mt-1 text-sm text-gray-500">选中文字自动高亮 · 点击任意位置添加标注 · 所见即所得</p>
       </div>
 
       {!file ? (
@@ -283,161 +332,234 @@ export default function EditPage() {
           accept={{ "application/pdf": [".pdf"] }}
           multiple={false}
           onFilesSelected={handleFileSelected}
-          placeholder="拖拽 PDF 或点击选择"
-          subPlaceholder="选择需要编辑的 PDF 文件"
+          placeholder="拖拽 PDF 文件或点击选择"
+          subPlaceholder="选择需要标注的 PDF"
         />
       ) : (
-        <>
-          {/* ---- 工具栏 ---- */}
-          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-gray-200 bg-white p-3">
-            {/* 工具选择 */}
-            <span className="text-sm text-gray-500">工具：</span>
-            <button
-              onClick={() => setTool("text")}
-              className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                tool === "text" ? "bg-blue-600 text-white" : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-              }`}
-            >
-              🔤 添加文字
-            </button>
-            <button
-              onClick={() => setTool("highlight")}
-              className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                tool === "highlight" ? "bg-amber-500 text-white" : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-              }`}
-            >
-              🖍️ 高亮标记
-            </button>
+        <div className="flex gap-4">
+          {/* ===== 左侧编辑区 ===== */}
+          <div className="flex-1 min-w-0">
+            {/* 工具栏 */}
+            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white p-2.5">
+              <span className="text-xs text-gray-400 mr-1">工具：</span>
+              <button
+                type="button"
+                onClick={() => setTool("highlight")}
+                className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                  tool === "highlight"
+                    ? "bg-amber-100 text-amber-800 ring-1 ring-amber-400"
+                    : "bg-gray-50 text-gray-600 hover:bg-gray-100"
+                }`}
+              >
+                🖍️ 划词高亮
+              </button>
+              <button
+                type="button"
+                onClick={() => setTool("text")}
+                className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${
+                  tool === "text"
+                    ? "bg-blue-100 text-blue-800 ring-1 ring-blue-400"
+                    : "bg-gray-50 text-gray-600 hover:bg-gray-100"
+                }`}
+              >
+                🔤 添加文字
+              </button>
 
-            <span className="mx-1 text-gray-300">|</span>
+              <span className="mx-1 text-gray-200">|</span>
 
-            {/* 文字工具配置 */}
-            {tool === "text" && (
-              <>
-                <span className="text-sm text-gray-500">颜色：</span>
-                {COLORS.map((c) => (
-                  <button
-                    key={c.hex}
-                    type="button"
-                    onClick={() => setTextColor(c.hex)}
-                    className="h-6 w-6 rounded-full border-2 transition-all"
-                    style={{
-                      backgroundColor: c.hex,
-                      borderColor: textColor === c.hex ? "#1e293b" : "transparent",
-                      outline: textColor === c.hex ? "2px solid #1e293b" : "none",
-                    }}
-                    title={c.label}
-                  />
-                ))}
-                <span className="text-sm text-gray-500 ml-2">字号：</span>
-                <select
-                  value={fontSize}
-                  onChange={(e) => setFontSize(Number(e.target.value))}
-                  className="rounded border border-gray-300 px-2 py-1 text-sm"
-                >
-                  {[12, 14, 16, 18, 20, 24, 28, 32].map((s) => (
-                    <option key={s} value={s}>{s}px</option>
+              {tool === "highlight" ? (
+                <>
+                  <span className="text-xs text-gray-400">颜色：</span>
+                  {HL_COLORS.map((c) => (
+                    <button
+                      key={c.hex} type="button" title={c.label}
+                      onClick={() => setHlColor(c)}
+                      className="h-6 w-7 rounded border-2 transition-all"
+                      style={{
+                        backgroundColor: c.hex,
+                        borderColor: hlColor.hex === c.hex ? "#1e293b" : "transparent",
+                      }}
+                    />
                   ))}
-                </select>
-              </>
-            )}
+                </>
+              ) : (
+                <>
+                  <span className="text-xs text-gray-400">颜色：</span>
+                  {TEXT_COLORS.map((c) => (
+                    <button
+                      key={c.hex} type="button" title={c.label}
+                      onClick={() => setTextColor(c.hex)}
+                      className="h-6 w-6 rounded-full border-2 transition-all"
+                      style={{
+                        backgroundColor: c.hex,
+                        borderColor: textColor === c.hex ? "#1e293b" : "transparent",
+                      }}
+                    />
+                  ))}
+                  <span className="text-xs text-gray-400 ml-1">大小：</span>
+                  <select
+                    value={fontSize}
+                    onChange={(e) => setFontSize(Number(e.target.value))}
+                    className="rounded border border-gray-300 px-2 py-1 text-xs"
+                    title="字号"
+                  >
+                    {[12,14,16,18,20,24,28,32,40].map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                </>
+              )}
 
-            {/* 高亮工具配置 */}
-            {tool === "highlight" && (
-              <>
-                <span className="text-sm text-gray-500">颜色：</span>
-                {["#fde047", "#fca5a5", "#a5f3fc", "#bbf7d0"].map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => setHighColor(c)}
-                    className="h-6 w-6 rounded-full border-2 transition-all"
-                    style={{
-                      backgroundColor: c,
-                      borderColor: highColor === c ? "#1e293b" : "transparent",
-                      outline: highColor === c ? "2px solid #1e293b" : "none",
-                    }}
-                    title={c}
-                  />
-                ))}
-              </>
-            )}
+              <span className="mx-1 text-gray-200">|</span>
 
-            <span className="mx-1 text-gray-300">|</span>
-
-            {/* 操作按钮 */}
-            <button
-              onClick={clearAnnotations}
-              className="rounded-lg border border-red-300 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50"
-            >
-              清除所有标注
-            </button>
-            <button
-              onClick={handleSave}
-              disabled={loading}
-              className="rounded-lg bg-green-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
-            >
-              {loading ? "保存中…" : `💾 保存修改 (${textAnnos.length + highlights.length} 处)`}
-            </button>
-          </div>
-
-          {/* ---- 翻页 ---- */}
-          {totalPages > 1 && (
-            <div className="mb-3 flex items-center justify-center gap-3">
               <button
-                onClick={() => goPage(currentPage - 1)}
-                disabled={currentPage <= 1}
-                className="rounded border px-3 py-1 text-sm disabled:opacity-30"
+                type="button"
+                onClick={handleSave}
+                disabled={loading || (highlights.length === 0 && textAnnos.length === 0)}
+                className="rounded bg-green-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-green-700 disabled:opacity-40"
               >
-                ← 上一页
-              </button>
-              <span className="text-sm text-gray-600">
-                第 {currentPage} / {totalPages} 页
-              </span>
-              <button
-                onClick={() => goPage(currentPage + 1)}
-                disabled={currentPage >= totalPages}
-                className="rounded border px-3 py-1 text-sm disabled:opacity-30"
-              >
-                下一页 →
+                💾 保存下载
               </button>
             </div>
-          )}
 
-          {error && (
-            <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-600">
-              {error}
+            {/* 提示条 */}
+            <div className="mb-2 rounded bg-gray-50 px-3 py-1.5 text-xs text-gray-500">
+              {tool === "highlight"
+                ? "🖍️ 按住鼠标在文字上拖拽 → 自动识别文字区域 → 松开即高亮"
+                : "🔤 在 PDF 上点击任意位置 → 输入文字 → 按 Enter 确认"}
             </div>
-          )}
 
-          <div className="mb-3 rounded-lg bg-amber-50 border border-amber-200 p-2 text-center text-xs text-amber-700">
-            {tool === "text"
-              ? "📝 文字模式：在 PDF 上点击任意位置添加文字"
-              : "🖍️ 高亮模式：按住鼠标拖拽选择区域进行高亮标记"}
-          </div>
+            {error && (
+              <div className="mb-2 rounded bg-red-50 px-3 py-1.5 text-xs text-red-600">{error}</div>
+            )}
 
-          {/* ---- Canvas 展示区 ---- */}
-          <div className="overflow-auto rounded-lg border-2 border-gray-200 bg-gray-100">
-            {loading && !canvasRef.current && (
-              <div className="flex items-center justify-center py-20 text-gray-400">
-                正在加载页面…
+            {/* 翻页 */}
+            {totalPages > 1 && (
+              <div className="mb-2 flex items-center justify-center gap-3 text-sm">
+                <button onClick={() => goPage(currentPage - 1)} disabled={currentPage <= 1} className="rounded border px-2 py-1 disabled:opacity-30">←</button>
+                <span className="text-gray-600">{currentPage}/{totalPages}</span>
+                <button onClick={() => goPage(currentPage + 1)} disabled={currentPage >= totalPages} className="rounded border px-2 py-1 disabled:opacity-30">→</button>
               </div>
             )}
-            <canvas
-              ref={canvasRef}
-              onMouseDown={handleCanvasMouseDown}
-              onMouseMove={handleCanvasMouseMove}
-              onMouseUp={handleCanvasMouseUp}
-              onMouseLeave={() => { dragRef.current = null; setDragRect(null); }}
-              className="mx-auto block cursor-crosshair"
-            />
+
+            {/* Canvas + Overlay */}
+            <div className="relative inline-block rounded-lg border border-gray-300 bg-white shadow-sm overflow-hidden">
+              {loading && (
+                <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/60">
+                  <span className="text-sm text-gray-400">加载中…</span>
+                </div>
+              )}
+              <canvas ref={canvasRef} className="block max-w-full" />
+              {/* 透明交互层 */}
+              <div
+                ref={overlayRef}
+                className="absolute inset-0 z-5"
+                style={{ cursor: tool === "highlight" ? "text" : "crosshair" }}
+                onMouseDown={handleMouseDown}
+                onMouseMove={handleMouseMove}
+                onMouseUp={handleMouseUp}
+                onMouseLeave={() => setSelecting(false)}
+              />
+
+              {/* 文字输入框（原位编辑） */}
+              {addingText && (
+                <div
+                  className="absolute z-20"
+                  style={{ left: addingText.x / SCALE, top: addingText.y / SCALE }}
+                >
+                  <div className="flex items-center gap-1 rounded border-2 border-blue-400 bg-white p-1 shadow-lg">
+                    <input
+                      autoFocus
+                      type="text"
+                      value={draftText}
+                      onChange={(e) => setDraftText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") confirmText();
+                        if (e.key === "Escape") setAddingText(null);
+                      }}
+                      placeholder="输入文字后回车"
+                      className="w-40 rounded border-none px-2 py-1 text-sm outline-none"
+                      style={{ color: textColor, fontSize: `${fontSize * 0.6}px` }}
+                    />
+                    <button
+                      type="button"
+                      onClick={confirmText}
+                      className="rounded bg-blue-600 px-2 py-0.5 text-xs text-white hover:bg-blue-700"
+                    >
+                      确认
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAddingText(null)}
+                      className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-600 hover:bg-gray-300"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
-          <p className="mt-6 text-xs text-gray-400">
-            💡 编辑操作完全在浏览器本地完成。添加文字时 <b>单击位置</b>；高亮时 <b>按住拖拽</b>。
-            标注效果为叠加图层，不影响原 PDF 其他内容。标注数据不存储。
-          </p>
-        </>
+          {/* ===== 右侧标注列表 ===== */}
+          <div className="w-60 flex-shrink-0">
+            <div className="sticky top-4">
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-700">
+                  标注列表
+                  <span className="ml-1 font-normal text-gray-400">
+                    ({highlights.length + textAnnos.length})
+                  </span>
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => { setHighlights([]); setTextAnnos([]); }}
+                  className="text-xs text-red-500 hover:underline"
+                >
+                  清除全部
+                </button>
+              </div>
+
+              <div className="max-h-96 space-y-1.5 overflow-y-auto">
+                {/* 当前页 */}
+                {curHL.length + curTA.length > 0 && (
+                  <div className="mb-2 text-xs text-gray-400">当前页</div>
+                )}
+                {curHL.map((h) => (
+                  <div key={h.id} className="flex items-center gap-2 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs">
+                    <div className="h-3 w-3 flex-shrink-0 rounded" style={{ backgroundColor: h.color }} />
+                    <span className="flex-1 truncate text-amber-800">高亮 ({h.rects.length}行)</span>
+                    <button type="button" onClick={() => removeHighlight(h.id)} className="text-amber-400 hover:text-red-500">✕</button>
+                  </div>
+                ))}
+                {curTA.map((a) => (
+                  <div key={a.id} className="flex items-center gap-2 rounded border border-blue-200 bg-blue-50 px-2 py-1.5 text-xs">
+                    <div className="h-3 w-3 flex-shrink-0 rounded-full" style={{ backgroundColor: a.color }} />
+                    <span className="flex-1 truncate text-blue-800">{a.text}</span>
+                    <button type="button" onClick={() => removeTextAnno(a.id)} className="text-blue-400 hover:text-red-500">✕</button>
+                  </div>
+                ))}
+
+                {/* 其他页 */}
+                {allHL.length + allTA.length > 0 && (
+                  <>
+                    <div className="mb-1 mt-3 text-xs text-gray-400">其他页</div>
+                    <p className="text-xs text-gray-400">
+                      共 {allHL.length + allTA.length} 个标注（仅显示当前页）
+                    </p>
+                  </>
+                )}
+
+                {highlights.length === 0 && textAnnos.length === 0 && (
+                  <p className="text-xs text-gray-300 py-6 text-center">
+                    还没有标注<br />
+                    {tool === "highlight" ? "拖拽文字添加高亮" : "点击页面添加文字"}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
