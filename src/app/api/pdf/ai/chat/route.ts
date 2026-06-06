@@ -38,7 +38,7 @@ export async function POST(req: NextRequest) {
 
     const truncated = context.slice(0, MAX_TEXT_LENGTH);
 
-    const apiKey = userKey || process.env.OPENAI_API_KEY;
+    const apiKey = userKey || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY;
     if (!apiKey) {
       return new Response(
         JSON.stringify({ error: "未配置 API Key" }),
@@ -47,7 +47,10 @@ export async function POST(req: NextRequest) {
     }
 
     const OpenAI = (await import("openai")).default;
-    const client = new OpenAI({ apiKey });
+    const client = new OpenAI({
+      apiKey,
+      baseURL: "https://api.deepseek.com",
+    });
 
     // ---- SSE 流式响应 ----
     const encoder = new TextEncoder();
@@ -55,7 +58,7 @@ export async function POST(req: NextRequest) {
       async start(controller) {
         try {
           const completion = await client.chat.completions.create({
-            model: "gpt-3.5-turbo",
+            model: "deepseek-chat",
             temperature: 0.5,
             stream: true,
             messages: [

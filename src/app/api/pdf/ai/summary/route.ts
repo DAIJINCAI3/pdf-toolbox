@@ -55,20 +55,23 @@ export async function POST(req: NextRequest) {
         ? `（注意：原文共 ${text.length.toLocaleString()} 字符，仅分析了前 ${MAX_TEXT_LENGTH.toLocaleString()} 字符）`
         : "";
 
-    // ---- 调用 OpenAI ----
-    const apiKey = userKey || process.env.OPENAI_API_KEY;
+    // ---- 调用 DeepSeek（兼容 OpenAI SDK）----
+    const apiKey = userKey || process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
-        { error: "未配置 API Key，请在页面中输入您的 OpenAI API Key" },
+        { error: "未配置 API Key，请在页面中输入您的 DeepSeek API Key" },
         { status: 401 }
       );
     }
 
     const OpenAI = (await import("openai")).default;
-    const client = new OpenAI({ apiKey });
+    const client = new OpenAI({
+      apiKey,
+      baseURL: "https://api.deepseek.com",
+    });
 
     const completion = await client.chat.completions.create({
-      model: "gpt-3.5-turbo",
+      model: "deepseek-chat",
       temperature: 0.3,
       messages: [
         {

@@ -201,14 +201,14 @@ export default function AIPage() {
       <div className="mb-8">
         <h1 className="mb-2 text-2xl font-bold">🤖 AI 智能助手</h1>
         <p className="text-gray-500">
-          上传 PDF，AI 帮你总结要点或对话问答。需要 OpenAI API Key。
+          上传 PDF，AI 帮你总结要点或对话问答。使用 DeepSeek API。
         </p>
       </div>
 
       {/* API Key 输入 */}
       <div className="mb-6 rounded-lg border border-yellow-200 bg-yellow-50 p-4">
         <label className="text-sm font-medium text-yellow-800">
-          🔑 OpenAI API Key（可选，若不填则使用系统 Key）
+          🔑 DeepSeek API Key（可选，若不填则使用默认 Key）
         </label>
         <input
           type="password"
@@ -220,7 +220,7 @@ export default function AIPage() {
         <p className="mt-1 text-xs text-yellow-600">
           你的 Key 仅本次使用，不会存储。
           <a
-            href="https://platform.openai.com/api-keys"
+            href="https://platform.deepseek.com/api_keys"
             target="_blank"
             rel="noopener"
             className="ml-1 underline"
@@ -369,7 +369,7 @@ export default function AIPage() {
 
           {/* 隐私提示 */}
           <p className="mt-6 text-xs text-gray-400">
-            ⚠️ 注意：AI 功能会将 PDF 中的文字上传到 OpenAI 处理。敏感文件请谨慎使用。
+            ⚠️ 注意：AI 功能会将 PDF 中的文字发送到 DeepSeek API 处理。敏感文件请谨慎使用。
             文本最多分析前 {3000} 个字符。
           </p>
         </>
