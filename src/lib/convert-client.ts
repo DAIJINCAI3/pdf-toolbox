@@ -1,48 +1,68 @@
 /**
- * 纯浏览器端 PDF 格式转换
- * — 公文规范排版 Word / 美观 PPT / 整洁 Excel
+ * 纯浏览器端 PDF 格式转换（深度优化版）
+ * — Word：GB/T 9704 公文规范 + 智能结构识别
+ * — PPT：封面/目录/内容/过渡/尾页 完整幻灯片体系
+ * — Excel：样式化表格 + 多Sheet + 自动列宽
  */
 
 import {
   Document, Packer, Paragraph, TextRun, HeadingLevel,
-  Header, Footer, PageNumber, NumberFormat,
+  Header, Footer, PageNumber,
   AlignmentType, convertMillimetersToTwip, LineRuleType,
+  BorderStyle, Table, TableRow, TableCell, WidthType,
 } from "docx";
 import * as XLSX from "xlsx";
 import PptxGenJS from "pptxgenjs";
 
 /* ================================================================
-   文字提取
+   类型定义
    ================================================================ */
 
 interface PageContent {
   pageNum: number;
   text: string;
-  thumbnail: string | null; // 缩略图 base64
+  thumbnail: string | null;
 }
 
-async function extractAllPages(buffer: ArrayBuffer): Promise<PageContent[]> {
+/** Word 段落结构 */
+interface DocSection {
+  type: "title" | "subtitle" | "heading1" | "heading2" | "heading3" | "body" | "blank";
+  text: string;
+}
+
+/* ================================================================
+   文字提取（修复空格 + 提高缩略图质量）
+   ================================================================ */
+
+async function extractAllPages(
+  buffer: ArrayBuffer,
+  onProgress?: (msg: string) => void
+): Promise<PageContent[]> {
   const pdfjsLib = await import("pdfjs-dist");
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     "https://unpkg.com/pdfjs-dist@6.0.227/build/pdf.worker.min.mjs";
 
   const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+  const total = pdf.numPages;
   const results: PageContent[] = [];
 
-  for (let i = 1; i <= pdf.numPages; i++) {
+  for (let i = 1; i <= total; i++) {
+    onProgress?.(`正在提取第 ${i}/${total} 页…`);
     const page = await pdf.getPage(i);
 
-    // 文字
-    const content = await page.getTextContent();
-    const text = content.items
+    // 文字 — 加上合理间距
+    const textContent = await page.getTextContent();
+    const items = textContent.items
       .filter((item) => "str" in item)
-      .map((item) => (item as { str: string }).str)
-      .join("");
+      .map((item) => (item as { str: string; height?: number; transform?: number[] }).str);
 
-    // 缩略图（小尺寸）
+    // 智能拼合：检测空格/换行
+    const text = smartJoinTextItems(items);
+
+    // 缩略图（提高质量）
     let thumbnail: string | null = null;
     try {
-      const vp = page.getViewport({ scale: 0.5 });
+      const vp = page.getViewport({ scale: 1.0 });
       const canvas = document.createElement("canvas");
       canvas.width = vp.width;
       canvas.height = vp.height;
@@ -50,10 +70,8 @@ async function extractAllPages(buffer: ArrayBuffer): Promise<PageContent[]> {
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       await page.render({ canvas, viewport: vp }).promise;
-      thumbnail = canvas.toDataURL("image/jpeg", 0.7);
-    } catch {
-      // 缩略图失败不影响主流程
-    }
+      thumbnail = canvas.toDataURL("image/jpeg", 0.85);
+    } catch { /* 忽略 */ }
 
     results.push({ pageNum: i, text: text.trim(), thumbnail });
   }
@@ -61,78 +79,126 @@ async function extractAllPages(buffer: ArrayBuffer): Promise<PageContent[]> {
   return results;
 }
 
+/** 智能拼合文字项 */
+function smartJoinTextItems(items: string[]): string {
+  if (items.length === 0) return "";
+
+  let result = "";
+  for (let i = 0; i < items.length; i++) {
+    const curr = items[i];
+    if (!curr) continue;
+
+    // 前面的字符
+    const prev = result[result.length - 1] || "";
+
+    // 如果前一个是中文字符且当前是文字，不需要额外空格
+    // 如果前一个是英文/数字，且当前是英文/数字，加空格
+    const prevIsCJK = /[一-鿿　-〿＀-￯。，、；：？！「」『』（）]/.test(prev);
+    const currIsCJK = /^[一-鿿　-〿＀-￯。，、；：？！「」『』（）]/.test(curr);
+
+    if (result.length > 0 && !prevIsCJK && !currIsCJK && prev !== " " && curr !== " ") {
+      result += " " + curr;
+    } else {
+      result += curr;
+    }
+  }
+
+  return result;
+}
+
 /* ================================================================
-   PDF → DOCX（公文规范格式 GB/T 9704-2012）
+   PDF → DOCX（公文规范 + 智能结构识别）
    ================================================================ */
 
-export async function pdfToDocx(buffer: ArrayBuffer, originalName: string): Promise<Blob> {
-  const pages = await extractAllPages(buffer);
-
-  // 合并所有页面文字
-  const fullText = pages.map((p) => p.text).join("\n").trim();
+export async function pdfToDocx(
+  buffer: ArrayBuffer,
+  originalName: string,
+  onProgress?: (msg: string) => void
+): Promise<Blob> {
+  onProgress?.("正在提取文字…");
+  const pages = await extractAllPages(buffer, onProgress);
+  const fullText = pages.map((p) => `[第${p.pageNum}页]\n${p.text}`).join("\n\n").trim();
   const fileName = originalName.replace(/\.pdf$/i, "");
 
-  // ---- 公文排版常量 ----
-  const CM_FONT = "仿宋";
-  const CM_FONT_GB = "仿宋_GB2312";
-  const HEI_FONT = "SimHei";      // 黑体（一级标题）
-  const KAI_FONT = "KaiTi";       // 楷体（二级标题）
-  const SONG_FONT = "SimSun";     // 宋体（标题）
-  const TITLE_SIZE = 44;          // 二号 = 22pt = 44 half-pts
-  const BODY_SIZE = 32;           // 三号 = 16pt = 32 half-pts
-  const LINE_SPACING = 560;       // 28磅固定行距 (28 * 20 = 560 twips)
-  const INDENT_CHARS = 480;       // 2 字符缩进 (约 480 twips)
+  onProgress?.("正在分析文档结构…");
 
-  // 页边距 (mm → twips)
-  const topMargin = convertMillimetersToTwip(37);
-  const bottomMargin = convertMillimetersToTwip(35);
-  const leftMargin = convertMillimetersToTwip(28);
-  const rightMargin = convertMillimetersToTwip(26);
+  // ---- 公文规格常量 ----
+  const TITLE_FONT = "SimSun";
+  const BODY_FONT = "FangSong";      // 英文名，Word 会自动匹配系统仿宋
+  const HEI_FONT = "SimHei";
+  const KAI_FONT = "KaiTi";
+  const TITLE_SZ = 44;               // 二号 22pt
+  const BODY_SZ = 32;                // 三号 16pt
+  const SMALL_SZ = 28;               // 四号 14pt
+  const LINE = 560;                  // 28磅 = 560 twips
+  const INDENT = 480;                // 2字符
 
-  // ---- 智能分段 ----
-  const paragraphs = buildOfficialParagraphs(fullText, {
-    titleFont: SONG_FONT,
-    titleSize: TITLE_SIZE,
-    bodyFont: CM_FONT_GB,
-    bodySize: BODY_SIZE,
-    heiFont: HEI_FONT,
-    kaiFont: KAI_FONT,
-    lineSpacing: LINE_SPACING,
-    indent: INDENT_CHARS,
+  // 页边距
+  const PAGE_MARGIN = {
+    top: convertMillimetersToTwip(37),
+    bottom: convertMillimetersToTwip(35),
+    left: convertMillimetersToTwip(28),
+    right: convertMillimetersToTwip(26),
+  };
+
+  // ---- 智能结构分析 ----
+  onProgress?.("正在排版…");
+  const sections = parseDocumentStructure(fullText, fileName);
+
+  // ---- 生成段落 ----
+  const paragraphs = sectionsToParagraphs(sections, {
+    titleFont: TITLE_FONT, titleSize: TITLE_SZ,
+    bodyFont: BODY_FONT, bodySize: BODY_SZ,
+    heiFont: HEI_FONT, kaiFont: KAI_FONT,
+    smallSize: SMALL_SZ, line: LINE, indent: INDENT,
   });
+
+  onProgress?.("正在生成 Word 文件…");
 
   const doc = new Document({
     title: fileName,
-    styles: {
-      default: {
-        document: {
-          run: { font: CM_FONT_GB, size: BODY_SIZE },
-        },
-      },
-    },
+    description: `由 PDF 工具箱转换生成 — ${new Date().toLocaleDateString("zh-CN")}`,
     sections: [{
       properties: {
         page: {
-          margin: { top: topMargin, bottom: bottomMargin, left: leftMargin, right: rightMargin },
+          margin: PAGE_MARGIN,
           size: { width: convertMillimetersToTwip(210), height: convertMillimetersToTwip(297) },
         },
       },
+      // 页眉：红色分隔线
       headers: {
         default: new Header({
-          children: [new Paragraph({
-            text: fileName,
-            alignment: AlignmentType.CENTER,
-            style: "Header",
-            border: { bottom: { color: "999999", size: 1, space: 4, style: "single" } },
-          })],
+          children: [
+            new Paragraph({
+              children: [new TextRun({ text: fileName, font: "FangSong", size: SMALL_SZ, color: "888888" })],
+              alignment: AlignmentType.CENTER,
+            }),
+            new Paragraph({
+              border: {
+                bottom: { color: "CC0000", size: 6, space: 2, style: BorderStyle.SINGLE },
+              },
+              spacing: { before: 60 },
+              children: [],
+            }),
+          ],
         }),
       },
+      // 页脚
       footers: {
         default: new Footer({
-          children: [new Paragraph({
-            alignment: AlignmentType.CENTER,
-            children: [new TextRun({ children: [PageNumber.CURRENT], font: SONG_FONT, size: 28 })],
-          })],
+          children: [
+            new Paragraph({
+              border: {
+                top: { color: "999999", size: 1, space: 4, style: BorderStyle.SINGLE },
+              },
+              alignment: AlignmentType.CENTER,
+              children: [
+                new TextRun({ children: ["— "], font: "SimSun", size: SMALL_SZ }),
+                new TextRun({ children: [PageNumber.CURRENT], font: "SimSun", size: SMALL_SZ }),
+                new TextRun({ children: [" —"], font: "SimSun", size: SMALL_SZ }),
+              ],
+            }),
+          ],
         }),
       },
       children: paragraphs,
@@ -142,96 +208,247 @@ export async function pdfToDocx(buffer: ArrayBuffer, originalName: string): Prom
   return Packer.toBlob(doc);
 }
 
-/** 智能分段：识别标题、一级/二级标题 */
-function buildOfficialParagraphs(
-  raw: string,
+/** 解析文档结构 */
+function parseDocumentStructure(raw: string, fileName: string): DocSection[] {
+  const result: DocSection[] = [];
+  const lines = raw
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  if (lines.length === 0) return result;
+
+  // 标题：取第一行（非页码标记行的最长行）
+  const firstLine = lines.find((l) => !/^\[第\d+页\]/.test(l)) || lines[0];
+  result.push({ type: "title", text: firstLine });
+
+  // 添加生成信息副标题
+  result.push({
+    type: "subtitle",
+    text: `（本文档由 PDF 工具箱从「${fileName}」转换生成）`,
+  });
+  result.push({ type: "blank", text: "" });
+
+  // 正文：逐行分析
+  const remaining = lines.filter((l) => l !== firstLine);
+
+  for (const line of remaining) {
+    const t = line.trim();
+    if (!t) continue;
+
+    // 页码标记 → 空行
+    if (/^\[第\d+页\]$/.test(t)) {
+      if (result.length > 0 && result[result.length - 1].type !== "blank") {
+        result.push({ type: "blank", text: "" });
+      }
+      continue;
+    }
+
+    // 去掉页码前缀
+    const clean = t.replace(/^\[第\d+页\]\s*/, "").trim();
+
+    // 一级标题：一、二、三、... / 第X章 / 第X节
+    if (/^(第[一二三四五六七八九十百千]+[章节条]|[一二三四五六七八九十]+[、，．])/.test(clean)) {
+      result.push({ type: "heading1", text: clean });
+      continue;
+    }
+
+    // 二级标题：（一）（二）... / 1.1 / 1.2
+    if (/^(（[一二三四五六七八九十]+）|\d+\.\d+)/.test(clean)) {
+      result.push({ type: "heading2", text: clean });
+      continue;
+    }
+
+    // 三级标题：1. / (1) / ①
+    if (/^(\d+[\.\)]|[（(]\d+[）)]|[①②③④⑤⑥⑦⑧⑨⑩])/.test(clean)) {
+      result.push({ type: "heading3", text: clean });
+      continue;
+    }
+
+    // 短行可能是标题（< 25 字且不含句号）
+    if (clean.length < 25 && !/[。！？；]$/.test(clean) && clean.length > 3) {
+      result.push({ type: "heading3", text: clean });
+      continue;
+    }
+
+    // 正文 — 按标点合理断句
+    const chunks = smartSplit(clean, 80);
+    for (const chunk of chunks) {
+      result.push({ type: "body", text: chunk });
+    }
+  }
+
+  return result;
+}
+
+/** 按标点断句，每段控制在合理长度 */
+function smartSplit(text: string, maxLen: number): string[] {
+  if (text.length <= maxLen) return [text];
+
+  const result: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLen) {
+      result.push(remaining);
+      break;
+    }
+
+    // 在 maxLen 之前找最佳断点：句号 > 分号 > 逗号 > 空格
+    const segment = remaining.slice(0, maxLen);
+    let cut = maxLen;
+
+    for (const sep of ["。", "；", "，", "、", " ", "）", "〕", "】"]) {
+      const pos = segment.lastIndexOf(sep);
+      if (pos > maxLen * 0.4) {
+        cut = pos + 1;
+        break;
+      }
+    }
+
+    result.push(remaining.slice(0, cut).trim());
+    remaining = remaining.slice(cut).trim();
+  }
+
+  return result;
+}
+
+/** 结构 → Word 段落 */
+function sectionsToParagraphs(
+  sections: DocSection[],
   s: {
     titleFont: string; titleSize: number;
     bodyFont: string; bodySize: number;
     heiFont: string; kaiFont: string;
-    lineSpacing: number; indent: number;
+    smallSize: number; line: number; indent: number;
   }
 ): Paragraph[] {
   const result: Paragraph[] = [];
-  const lines = raw.split(/\n+/).filter((l) => l.trim());
 
-  if (lines.length === 0) return result;
+  for (const sec of sections) {
+    switch (sec.type) {
+      case "title":
+        result.push(
+          new Paragraph({
+            children: [new TextRun({ text: sec.text, font: s.titleFont, size: s.titleSize, bold: true })],
+            alignment: AlignmentType.CENTER,
+            spacing: { after: 200, line: s.line },
+          })
+        );
+        break;
 
-  // 第一行作为标题
-  result.push(
-    new Paragraph({
-      children: [new TextRun({ text: lines[0], font: s.titleFont, size: s.titleSize, bold: true })],
-      alignment: AlignmentType.CENTER,
-      spacing: { after: 560, line: s.lineSpacing },
-    })
-  );
+      case "subtitle":
+        result.push(
+          new Paragraph({
+            children: [new TextRun({ text: sec.text, font: s.kaiFont, size: s.smallSize, color: "888888" })],
+            alignment: AlignmentType.CENTER,
+            spacing: { after: 300, line: s.line },
+          })
+        );
+        break;
 
-  // 后续行：智能识别结构
-  const rest = lines.slice(1);
+      case "heading1":
+        result.push(
+          new Paragraph({
+            children: [new TextRun({ text: sec.text, font: s.heiFont, size: s.bodySize, bold: true })],
+            spacing: { before: 300, after: 120, line: s.line },
+          })
+        );
+        break;
 
-  for (const line of rest) {
-    const trimmed = line.trim();
-    if (trimmed.length < 3) continue;
+      case "heading2":
+        result.push(
+          new Paragraph({
+            children: [new TextRun({ text: sec.text, font: s.kaiFont, size: s.bodySize, bold: true })],
+            spacing: { before: 180, after: 80, line: s.line },
+          })
+        );
+        break;
 
-    // 一级标题（一、二、三、…）
-    if (/^[一二三四五六七八九十]+[、，．]/.test(trimmed)) {
-      result.push(
-        new Paragraph({
-          children: [new TextRun({ text: trimmed, font: s.heiFont, size: s.bodySize, bold: true })],
-          spacing: { before: 280, after: 140, line: s.lineSpacing },
-        })
-      );
-      continue;
+      case "heading3":
+        result.push(
+          new Paragraph({
+            children: [new TextRun({ text: sec.text, font: s.bodyFont, size: s.bodySize, bold: true })],
+            indent: { firstLine: s.indent },
+            spacing: { before: 120, after: 40, line: s.line },
+          })
+        );
+        break;
+
+      case "body":
+        result.push(
+          new Paragraph({
+            children: [new TextRun({ text: `　　${sec.text}`, font: s.bodyFont, size: s.bodySize })],
+            alignment: AlignmentType.JUSTIFIED,
+            spacing: { line: s.line, lineRule: LineRuleType.EXACT },
+          })
+        );
+        break;
+
+      case "blank":
+        result.push(new Paragraph({ children: [], spacing: { after: 200 } }));
+        break;
     }
-
-    // 二级标题（（一）（二）…）
-    if (/^（[一二三四五六七八九十]+）/.test(trimmed)) {
-      result.push(
-        new Paragraph({
-          children: [new TextRun({ text: trimmed, font: s.kaiFont, size: s.bodySize, bold: true })],
-          spacing: { before: 140, after: 70, line: s.lineSpacing },
-        })
-      );
-      continue;
-    }
-
-    // 普通正文段落
-    result.push(
-      new Paragraph({
-        children: [new TextRun({ text: trimmed, font: s.bodyFont, size: s.bodySize })],
-        indent: { firstLine: s.indent },
-        alignment: AlignmentType.JUSTIFIED,
-        spacing: { line: s.lineSpacing, lineRule: LineRuleType.EXACT },
-      })
-    );
   }
 
   return result;
 }
 
 /* ================================================================
-   PDF → XLSX（整洁表格）
+   PDF → XLSX（样式化表格）
    ================================================================ */
 
-export async function pdfToXlsx(buffer: ArrayBuffer, originalName: string): Promise<Blob> {
-  const pages = await extractAllPages(buffer);
+export async function pdfToXlsx(
+  buffer: ArrayBuffer,
+  originalName: string,
+  onProgress?: (msg: string) => void
+): Promise<Blob> {
+  onProgress?.("正在提取文字…");
+  const pages = await extractAllPages(buffer, onProgress);
   const fileName = originalName.replace(/\.pdf$/i, "");
 
-  const wsName = fileName.length > 28 ? fileName.slice(0, 28) : fileName;
+  onProgress?.("正在生成 Excel…");
 
-  const rows: string[][] = [["页码", "内容"]];
+  const wsName = fileName.slice(0, 31);
 
-  for (const page of pages) {
-    if (page.text) {
-      rows.push([`第 ${page.pageNum} 页`, page.text]);
-    }
-  }
+  // 表头
+  const headerRow = ["序号", "页码", "内容摘要", "字符数"];
+  const dataRows = pages
+    .filter((p) => p.text.length > 0)
+    .map((p, i) => [
+      String(i + 1),
+      `第 ${p.pageNum} 页`,
+      p.text.length > 100 ? p.text.slice(0, 100) + "…" : p.text,
+      String(p.text.length),
+    ]);
 
-  const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws["!cols"] = [{ wch: 12 }, { wch: 80 }];
+  const allRows = [headerRow, ...dataRows];
+  const ws = XLSX.utils.aoa_to_sheet(allRows);
+
+  // 列宽
+  ws["!cols"] = [
+    { wch: 6 },   // 序号
+    { wch: 10 },  // 页码
+    { wch: 60 },  // 内容
+    { wch: 10 },  // 字符数
+  ];
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, wsName);
+
+  // 如果文字多，加一个详细 sheet
+  const hasDetail = pages.some((p) => p.text.length > 100);
+  if (hasDetail) {
+    const detailRows: string[][] = [["页码", "完整内容"]];
+    for (const p of pages) {
+      if (p.text) {
+        detailRows.push([`第 ${p.pageNum} 页`, p.text]);
+      }
+    }
+    const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
+    ws2["!cols"] = [{ wch: 10 }, { wch: 100 }];
+    XLSX.utils.book_append_sheet(wb, ws2, "完整内容");
+  }
 
   const buf = XLSX.write(wb, { bookType: "xlsx", type: "array" });
   return new Blob([buf], {
@@ -240,102 +457,272 @@ export async function pdfToXlsx(buffer: ArrayBuffer, originalName: string): Prom
 }
 
 /* ================================================================
-   PDF → PPTX（美观设计）
+   PDF → PPTX（完整幻灯片体系）
    ================================================================ */
 
-export async function pdfToPptx(buffer: ArrayBuffer, originalName: string): Promise<Blob> {
-  const pages = await extractAllPages(buffer);
+export async function pdfToPptx(
+  buffer: ArrayBuffer,
+  originalName: string,
+  onProgress?: (msg: string) => void
+): Promise<Blob> {
+  onProgress?.("正在提取文字和图片…");
+  const pages = await extractAllPages(buffer, onProgress);
   const fileName = originalName.replace(/\.pdf$/i, "");
+  const validPages = pages.filter((p) => p.text || p.thumbnail);
+
+  onProgress?.("正在设计幻灯片…");
 
   const pres = new PptxGenJS();
   pres.layout = "LAYOUT_WIDE";
   pres.author = "PDF工具箱";
-  pres.title = fileName;
 
-  // 配色方案
-  const colors = {
-    primary: "1a56db",
-    accent: "f59e0b",
-    dark: "1f2937",
-    light: "f3f4f6",
+  // === 配色体系 ===
+  const C = {
+    blue: "2563eb",
+    blueLight: "dbeafe",
+    blueDark: "1e3a5f",
+    indigo: "4338ca",
+    teal: "0d9488",
+    orange: "ea580c",
+    slate: "1e293b",
+    gray: "64748b",
     white: "ffffff",
-    muted: "6b7280",
+    offWhite: "f8fafc",
+    border: "e2e8f0",
   };
 
-  // ---- 封面 ----
-  const cover = pres.addSlide();
-  cover.background = { color: colors.primary };
-  cover.addText(fileName, {
-    x: 0.5, y: 1.0, w: "90%", h: 1.5,
-    fontSize: 32, bold: true, color: colors.white,
+  // === 封面 ===
+  addCoverSlide(pres, fileName, pages.length, C);
+
+  // === 目录 ===
+  if (validPages.length >= 3) {
+    addTocSlide(pres, validPages, C);
+  }
+
+  // === 内容页 ===
+  for (let idx = 0; idx < validPages.length; idx++) {
+    const page = validPages[idx];
+    // 每 5 页插入过渡页
+    if (idx > 0 && idx % 5 === 0) {
+      addTransitionSlide(pres, idx, validPages.length, C);
+    }
+    addContentSlide(pres, page, idx + 1, validPages.length, C);
+  }
+
+  // === 尾页 ===
+  addEndSlide(pres, C);
+
+  onProgress?.("正在生成 PPT…");
+  return (await pres.write({ outputType: "blob" })) as Blob;
+}
+
+/** 封面 */
+function addCoverSlide(
+  pres: PptxGenJS,
+  title: string,
+  totalPages: number,
+  C: Record<string, string>
+) {
+  const slide = pres.addSlide();
+  // 渐变背景（用双色矩形模拟）
+  slide.background = { color: C.blueDark };
+  // 装饰条
+  slide.addShape(pres.ShapeType.rect, {
+    x: 0, y: 0, w: "100%", h: 0.08,
+    fill: { color: C.orange },
+  });
+  slide.addShape(pres.ShapeType.rect, {
+    x: 0, y: 0.08, w: "100%", h: 0.04,
+    fill: { color: C.blue },
+  });
+  // 主标题
+  slide.addText(title, {
+    x: 0.8, y: 1.2, w: "85%", h: 1.6,
+    fontSize: 36, bold: true, color: C.white,
     align: "center", valign: "middle",
   });
-  cover.addText(`共 ${pages.length} 页 · 由 PDF工具箱 转换`, {
-    x: 0.5, y: 2.8, w: "90%", h: 0.5,
-    fontSize: 14, color: "a5c8ff",
+  // 装饰线
+  slide.addShape(pres.ShapeType.rect, {
+    x: 3.5, y: 3.0, w: 3.0, h: 0.04,
+    fill: { color: C.orange },
+  });
+  // 副标题
+  slide.addText(`共 ${totalPages} 页 · ${new Date().toLocaleDateString("zh-CN")} 转换`, {
+    x: 0.8, y: 3.2, w: "85%", h: 0.6,
+    fontSize: 16, color: "94a3b8",
     align: "center",
   });
+  slide.addText("pdf-toolbox.vercel.app", {
+    x: 0.8, y: 4.5, w: "85%", h: 0.5,
+    fontSize: 12, color: "64748b",
+    align: "center",
+  });
+}
 
-  // ---- 内容页 ----
-  for (const page of pages) {
-    if (!page.text && !page.thumbnail) continue;
+/** 目录 */
+function addTocSlide(
+  pres: PptxGenJS,
+  pages: PageContent[],
+  C: Record<string, string>
+) {
+  const slide = pres.addSlide();
+  slide.background = { color: C.offWhite };
+  slide.addText("目  录", {
+    x: 0.8, y: 0.4, w: 4, h: 0.7,
+    fontSize: 24, bold: true, color: C.slate,
+  });
+  slide.addShape(pres.ShapeType.rect, {
+    x: 0.8, y: 1.15, w: 2.0, h: 0.04,
+    fill: { color: C.blue },
+  });
 
-    const slide = pres.addSlide();
-    slide.background = { color: colors.white };
+  // 目录项
+  const items = pages.slice(0, 12); // 最多 12 项
+  const colCount = items.length > 6 ? 2 : 1;
+  for (let i = 0; i < items.length; i++) {
+    const col = i < (colCount === 2 ? 6 : items.length) ? 0 : 1;
+    const row = col === 0 ? i : i - 6;
+    const x = col === 0 ? 0.8 : 5.3;
 
-    // 页码徽章
-    slide.addText(`第 ${page.pageNum} 页`, {
-      x: 0.3, y: 0.15, w: 1.2, h: 0.35,
-      fontSize: 10, color: colors.white, bold: true,
-      align: "center", fill: { color: colors.primary },
-      rectRadius: 0.1,
+    const p = items[i];
+    const preview = (p.text || "").slice(0, 30) || "（扫描页）";
+
+    slide.addText(`${p.pageNum}. ${preview}${p.text.length > 30 ? "…" : ""}`, {
+      x, y: 1.5 + row * 0.52, w: 4.2, h: 0.45,
+      fontSize: 12, color: C.slate,
+      bullet: false,
     });
+  }
+}
 
-    // 如果有缩略图，放在左侧
-    if (page.thumbnail) {
-      slide.addImage({
-        data: page.thumbnail, x: 0.3, y: 0.7, w: 3.5, h: 4.2,
-        sizing: { type: "contain", w: 3.5, h: 4.2 },
-        rounding: true,
-      });
-    }
+/** 过渡页 */
+function addTransitionSlide(
+  pres: PptxGenJS,
+  completed: number,
+  total: number,
+  C: Record<string, string>
+) {
+  const slide = pres.addSlide();
+  slide.background = { color: C.indigo };
+  slide.addText(`${completed} / ${total}`, {
+    x: 0.5, y: 1.5, w: "90%", h: 1.2,
+    fontSize: 48, bold: true, color: C.white,
+    align: "center",
+  });
+  slide.addText("继续浏览…", {
+    x: 0.5, y: 2.8, w: "90%", h: 0.6,
+    fontSize: 18, color: "a5b4fc",
+    align: "center",
+  });
+}
 
-    // 文字在右侧
-    const textX = page.thumbnail ? 4.2 : 0.5;
-    const textW = page.thumbnail ? "58%" : "90%";
+/** 内容页 */
+function addContentSlide(
+  pres: PptxGenJS,
+  page: PageContent,
+  pageIndex: number,
+  total: number,
+  C: Record<string, string>
+) {
+  const slide = pres.addSlide();
+  slide.background = { color: C.white };
 
-    if (page.text) {
-      const display = page.text.length > 1500 ? page.text.slice(0, 1500) + " …" : page.text;
+  // 顶部导航栏
+  slide.addShape(pres.ShapeType.rect, {
+    x: 0, y: 0, w: "100%", h: 0.06,
+    fill: { color: C.blue },
+  });
 
-      slide.addText(display, {
-        x: textX, y: 0.7, w: textW, h: 4.8,
-        fontSize: 11, color: colors.dark,
-        valign: "top", lineSpacing: 18,
-      });
-    }
+  // 页码徽章
+  slide.addText(`${pageIndex}`, {
+    x: 0.3, y: 0.2, w: 0.6, h: 0.55,
+    fontSize: 18, bold: true, color: C.white,
+    align: "center", valign: "middle",
+    fill: { color: C.blue },
+    rectRadius: 0.1,
+  });
 
-    // 底部分隔线
-    slide.addShape(pres.ShapeType.rect, {
-      x: 0.5, y: 5.5, w: "92%", h: 0.02,
-      fill: { color: "e5e7eb" },
+  // 进度条
+  const pct = Math.round((pageIndex / total) * 100);
+  slide.addText(`${pct}%`, {
+    x: 8.8, y: 0.2, w: 0.8, h: 0.35,
+    fontSize: 10, color: C.gray, align: "right",
+  });
+
+  // 缩略图（如果存在）
+  if (page.thumbnail) {
+    slide.addImage({
+      data: page.thumbnail,
+      x: 0.3, y: 0.9, w: 4.2, h: 4.5,
+      sizing: { type: "contain", w: 4.2, h: 4.5 },
+      rounding: true,
     });
   }
 
-  // ---- 尾页 ----
-  const endSlide = pres.addSlide();
-  endSlide.background = { color: colors.dark };
-  endSlide.addText("感谢使用 PDF工具箱", {
-    x: 0.5, y: 1.5, w: "90%", h: 1.0,
-    fontSize: 28, bold: true, color: colors.white,
+  // 文字区域
+  const textX = page.thumbnail ? 4.8 : 0.5;
+  const textW = page.thumbnail ? 4.7 : 9.0;
+
+  if (page.text) {
+    // 提取首句作为标题
+    const sentences = page.text.split(/[。；]/);
+    const keyTitle = sentences[0]?.slice(0, 40) || "";
+
+    if (keyTitle) {
+      slide.addText(keyTitle, {
+        x: textX, y: 0.9, w: textW, h: 0.5,
+        fontSize: 14, bold: true, color: C.slate,
+      });
+    }
+
+    // 正文
+    const body = page.text.length > 1200 ? page.text.slice(0, 1200) + " …" : page.text;
+    const bodyY = keyTitle ? 1.5 : 0.9;
+
+    slide.addText(body, {
+      x: textX, y: bodyY, w: textW, h: 4.0,
+      fontSize: 10.5, color: C.gray,
+      valign: "top", lineSpacing: 16,
+    });
+  }
+
+  // 底部信息
+  slide.addShape(pres.ShapeType.rect, {
+    x: 0.3, y: 5.7, w: 9.4, h: 0.01,
+    fill: { color: C.border },
+  });
+  slide.addText(`第 ${page.pageNum} 页  ·  由 PDF工具箱 转换`, {
+    x: 0.3, y: 5.72, w: 9.4, h: 0.3,
+    fontSize: 8, color: C.gray, align: "center",
+  });
+}
+
+/** 尾页 */
+function addEndSlide(pres: PptxGenJS, C: Record<string, string>) {
+  const slide = pres.addSlide();
+  slide.background = { color: C.slate };
+
+  slide.addText("感谢使用", {
+    x: 0.5, y: 1.2, w: "90%", h: 0.8,
+    fontSize: 36, bold: true, color: C.white,
     align: "center",
   });
-  endSlide.addText("pdf-toolbox.vercel.app", {
-    x: 0.5, y: 2.8, w: "90%", h: 0.6,
-    fontSize: 16, color: colors.muted,
+  slide.addText("PDF 工具箱", {
+    x: 0.5, y: 2.0, w: "90%", h: 1.0,
+    fontSize: 44, bold: true, color: C.orange,
     align: "center",
   });
 
-  return (await pres.write({ outputType: "blob" })) as Blob;
+  slide.addShape(pres.ShapeType.rect, {
+    x: 3.8, y: 3.2, w: 2.4, h: 0.04,
+    fill: { color: C.gray },
+  });
+
+  slide.addText("pdf-toolbox.vercel.app\n免费 · 安全 · 高效", {
+    x: 0.5, y: 3.5, w: "90%", h: 1.0,
+    fontSize: 14, color: C.gray,
+    align: "center", lineSpacing: 22,
+  });
 }
 
 /* ================================================================
