@@ -2,11 +2,12 @@
 
 import { useState, useCallback } from "react";
 import FileUploader from "@/components/FileUploader";
+import { pdfToDocx, pdfToXlsx, pdfToPptx, downloadBlob } from "@/lib/convert-client";
 
 const FORMATS = [
-  { value: "docx", label: "Word (.docx)", icon: "📝", desc: "转为可编辑的 Word 文档" },
-  { value: "xlsx", label: "Excel (.xlsx)", icon: "📊", desc: "提取表格数据为 Excel" },
-  { value: "pptx", label: "PPT (.pptx)", icon: "📽️", desc: "转为 PowerPoint 演示文稿" },
+  { value: "docx", label: "Word (.docx)", icon: "📝", desc: "提取文字生成可编辑的 Word 文档", filename: "converted.docx" },
+  { value: "xlsx", label: "Excel (.xlsx)", icon: "📊", desc: "每页一行，适合表格类 PDF 导出", filename: "converted.xlsx" },
+  { value: "pptx", label: "PPT (.pptx)", icon: "📽️", desc: "每页生成一张幻灯片，方便演示", filename: "converted.pptx" },
 ] as const;
 
 export default function ConvertPage() {
@@ -14,13 +15,13 @@ export default function ConvertPage() {
   const [format, setFormat] = useState<string>("docx");
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState("");
-  const [serverMsg, setServerMsg] = useState("");
+  const [progress, setProgress] = useState("");
 
   const handleFileSelected = useCallback((files: File[]) => {
     if (files.length > 0) {
       setFile(files[0]);
       setError("");
-      setServerMsg("");
+      setProgress("");
     }
   }, []);
 
@@ -28,42 +29,35 @@ export default function ConvertPage() {
     if (!file) return;
     setProcessing(true);
     setError("");
-    setServerMsg("");
+    setProgress("正在提取 PDF 文字…");
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("format", format);
+      const buffer = await file.arrayBuffer();
+      let blob: Blob;
 
-      const res = await fetch("/api/pdf/convert", { method: "POST", body: formData });
+      setProgress("正在生成文件…");
 
-      if (!res.ok) {
-        const data = await res.json();
-
-        // 503 = 未安装 LibreOffice
-        if (res.status === 503 && data.installGuide) {
-          setServerMsg(
-            `⚠️ 服务器未安装 LibreOffice，暂不支持此功能。\n\n📌 解决方案：\n${data.installGuide}`
-          );
-          setError("此功能需要 LibreOffice，Vercel 免费版不支持。");
-          return;
-        }
-
-        throw new Error(data.error || "转换失败");
+      switch (format) {
+        case "docx":
+          blob = await pdfToDocx(buffer);
+          break;
+        case "xlsx":
+          blob = await pdfToXlsx(buffer);
+          break;
+        case "pptx":
+          blob = await pdfToPptx(buffer);
+          break;
+        default:
+          throw new Error("不支持的格式");
       }
 
-      // 下载转换结果
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `converted.${format}`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
+      setProgress("转换完成，正在下载…");
+      const fmt = FORMATS.find((f) => f.value === format)!;
+      downloadBlob(blob, fmt.filename);
+      setProgress("✅ 下载完成！");
     } catch (e) {
       setError(e instanceof Error ? e.message : "转换失败");
+      setProgress("");
     } finally {
       setProcessing(false);
     }
@@ -74,14 +68,14 @@ export default function ConvertPage() {
       <div className="mb-8">
         <h1 className="mb-2 text-2xl font-bold">🔄 格式互转</h1>
         <p className="text-gray-500">
-          将 PDF 转换为 Word、Excel 或 PowerPoint 格式
+          纯浏览器端转换，无需服务器，无需安装任何软件。文字提取后生成新文件。
         </p>
       </div>
 
       {/* 说明 */}
-      <div className="mb-6 rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-700">
-        💡 此功能需要后端安装 LibreOffice。当前部署在 Vercel（Serverless），暂不可用。
-        如需使用，请将项目部署到 VPS 并安装 <code className="bg-blue-100 px-1 rounded">sudo apt install libreoffice</code>。
+      <div className="mb-6 rounded-lg border border-green-200 bg-green-50 p-4 text-sm text-green-700">
+        🎉 完全在浏览器中完成，不依赖任何后端服务。支持文字型 PDF。
+        扫描图片型 PDF 请先使用 OCR 工具。
       </div>
 
       {!file ? (
@@ -89,24 +83,27 @@ export default function ConvertPage() {
           accept={{ "application/pdf": [".pdf"] }}
           multiple={false}
           onFilesSelected={handleFileSelected}
-          placeholder="拖拽 PDF 文件或点击选择"
-          subPlaceholder="选择需要转换的 PDF"
+          placeholder="拖拽 PDF 或点击选择"
+          subPlaceholder="选择需要转换的 PDF（文字型）"
         />
       ) : (
         <>
           <button
             type="button"
-            onClick={() => { setFile(null); setError(""); setServerMsg(""); }}
+            onClick={() => { setFile(null); setError(""); setProgress(""); }}
             className="mb-4 text-sm text-blue-600 hover:underline"
           >
             ← 重新选择
           </button>
 
           <div className="mb-4 rounded-lg border border-gray-200 bg-white p-4">
-            <p className="font-medium">{file.name}</p>
+            <p className="font-medium">📄 {file.name}</p>
+            <p className="text-xs text-gray-400 mt-1">
+              {(file.size / 1024 / 1024).toFixed(2)} MB
+            </p>
           </div>
 
-          {/* 目标格式选择 */}
+          {/* 目标格式 */}
           <div className="mb-6">
             <h3 className="mb-3 font-semibold text-gray-700">选择目标格式</h3>
             <div className="space-y-2">
@@ -138,12 +135,15 @@ export default function ConvertPage() {
             </div>
           </div>
 
+          {progress && !error && (
+            <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
+              {progress}
+            </div>
+          )}
+
           {error && (
             <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-600">
-              {error}
-              {serverMsg && (
-                <pre className="mt-2 whitespace-pre-wrap text-xs text-gray-600">{serverMsg}</pre>
-              )}
+              ❌ {error}
             </div>
           )}
 
@@ -153,7 +153,7 @@ export default function ConvertPage() {
             disabled={processing}
             className="w-full rounded-lg bg-blue-600 py-3 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
           >
-            {processing ? "转换中..." : "开始转换"}
+            {processing ? "转换中…" : `转为 ${FORMATS.find(f => f.value === format)?.label}`}
           </button>
         </>
       )}

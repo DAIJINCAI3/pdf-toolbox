@@ -12,6 +12,7 @@
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
+    "docx": "^9.7.1",
     "jspdf": "^4.2.1",
     "next": "16.2.7",
     "openai": "^6.42.0",
@@ -19,9 +20,11 @@
     "pdf-parse": "^2.4.5",
     "pdf2json": "^4.0.3",
     "pdfjs-dist": "^6.0.227",
+    "pptxgenjs": "^4.0.1",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "react-dropzone": "^15.0.0"
+    "react-dropzone": "^15.0.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
